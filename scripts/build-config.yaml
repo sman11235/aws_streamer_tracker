@@ -1,0 +1,7 @@
+functions:
+  subscribe-to-websub: ../aws/lambda/subscribe_to_websub.py
+  subscribe-to-eventsub: ../aws/lambda/subscribe_to_eventsub.py
+  handle-youtube-notifs: ../aws/lambda/handle_youtube_notifs.py
+  handle-twitch-notifs: ../aws/lambda/handle_twitch_notifs.py
+  handle-stream-events: ../aws/lambda/handle_stream_events.py
+  get-stream-stats: ../aws/lambda/get_stream_stats.py
