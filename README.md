@@ -24,6 +24,12 @@ The script writes to `terraform/artifacts/`, matching Terraform's default `lambd
 
 Each ZIP contains its corresponding Python module at the archive root. The source files are currently empty placeholders; add a `handler` function before invoking the Lambdas. The script packages only these modules; dependency packaging must be added when dependencies are introduced. Rerun the script after changing the source files and before deploying with Terraform.
 
+## CI/CD
+
+[GitHub Actions](.github/workflows/deploy.yml) builds the Lambda ZIPs and validates Terraform on pull requests. Successful pushes to `main` deploy the application stack to the GitHub `dev` environment using AWS OIDC and shared S3 Terraform state. Manual deployments are also available from `main`.
+
+Follow the [AWS deployment setup](docs/aws-deployment.md) to bootstrap the state bucket and deployment role, configure the GitHub environment variables, and migrate any existing local Terraform state before the first CI deployment.
+
 ## Database
 
 Terraform provisions a private Amazon RDS PostgreSQL instance. Its master password is generated and stored by RDS in Secrets Manager. The database schema is in [`terraform/schema.sql`](terraform/schema.sql); apply it after RDS is available with a PostgreSQL client that can reach the private database (for example, through a VPN, bastion host, or an approved migration job).
