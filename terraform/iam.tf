@@ -18,27 +18,27 @@ data "aws_iam_policy_document" "lambda_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
-      type = "Service"
+      type        = "Service"
       identifiers = ["lambda.amazonaws.com"]
     }
   }
 }
 
 resource "aws_iam_role" "lambda" {
-  for_each = local.functions
-  name = "${local.prefix}-${each.key}-role"
+  for_each           = local.functions
+  name               = "${local.prefix}-${each.key}-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_logs" {
-  for_each = local.functions
-  role = aws_iam_role.lambda[each.key].name
+  for_each   = local.functions
+  role       = aws_iam_role.lambda[each.key].name
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_vpc" {
-  for_each = local.functions
-  role = aws_iam_role.lambda[each.key].name
+  for_each   = local.functions
+  role       = aws_iam_role.lambda[each.key].name
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
@@ -47,7 +47,7 @@ data "aws_iam_policy_document" "function_permissions" {
   dynamic "statement" {
     for_each = contains(["handle-youtube-notifs", "handle-twitch-notifs"], each.key) ? [1] : []
     content {
-      actions = ["events:PutEvents"]
+      actions   = ["events:PutEvents"]
       resources = [aws_cloudwatch_event_bus.stream_events.arn]
     }
   }
@@ -58,7 +58,7 @@ data "aws_iam_policy_document" "function_permissions" {
   dynamic "statement" {
     for_each = contains(["subscribe-to-eventsub", "handle-twitch-notifs", "get-stream-stats", "handle-youtube-notifs", "subscribe-to-websub"], each.key) ? [1] : []
     content {
-      actions = ["ssm:GetParameter"]
+      actions   = ["ssm:GetParameter"]
       resources = local.secret_arns
     }
   }
@@ -66,22 +66,22 @@ data "aws_iam_policy_document" "function_permissions" {
 
 resource "aws_iam_role_policy" "function" {
   for_each = local.functions
-  name = "${local.prefix}-${each.key}-permissions"
-  role = aws_iam_role.lambda[each.key].id
-  policy = data.aws_iam_policy_document.function_permissions[each.key].json
+  name     = "${local.prefix}-${each.key}-permissions"
+  role     = aws_iam_role.lambda[each.key].id
+  policy   = data.aws_iam_policy_document.function_permissions[each.key].json
 }
 
 data "aws_iam_policy_document" "scheduler_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
-      type = "Service"
+      type        = "Service"
       identifiers = ["scheduler.amazonaws.com"]
     }
   }
 }
 resource "aws_iam_role" "scheduler" {
-  name = "${local.prefix}-scheduler-role"
+  name               = "${local.prefix}-scheduler-role"
   assume_role_policy = data.aws_iam_policy_document.scheduler_assume.json
 }
 resource "aws_iam_role_policy" "scheduler" {

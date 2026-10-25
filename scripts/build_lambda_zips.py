@@ -4,7 +4,7 @@
 import argparse
 from pathlib import Path
 import re
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +61,11 @@ def main():
     for name, source in sources.items():
         destination = args.output_dir / f"{name}.zip"
         with ZipFile(destination, "w", compression=ZIP_DEFLATED) as archive:
-            archive.write(source, arcname=source.name)
+            # Keep hashes stable across fresh CI checkouts of unchanged sources.
+            info = ZipInfo(source.name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, source.read_bytes())
         print(f"Built {destination}")
 
 

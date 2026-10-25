@@ -9,6 +9,13 @@ __pycache__/
 # Distribution / packaging
 .Python
 terraform/artifacts/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfbackend
+*.tfvars
+*.tfvars.json
 build/
 develop-eggs/
 dist/
