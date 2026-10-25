@@ -37,6 +37,18 @@ variable "github_repository" {
   default     = "sman11235/aws_streamer_tracker"
 }
 
+variable "github_owner_id" {
+  description = "Immutable numeric GitHub owner ID used in the OIDC subject."
+  type        = string
+  default     = "157008436"
+}
+
+variable "github_repository_id" {
+  description = "Immutable numeric GitHub repository ID used in the OIDC subject."
+  type        = string
+  default     = "1379103315"
+}
+
 variable "existing_oidc_provider_arn" {
   description = "Reuse the account's GitHub OIDC provider if one already exists."
   type        = string
@@ -50,6 +62,9 @@ locals {
   prefix    = "${var.project}-dev"
   state_key = "${var.project}/dev/terraform.tfstate"
   oidc_arn  = var.existing_oidc_provider_arn != null ? var.existing_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
+
+  github_repository_parts = split("/", var.github_repository)
+  github_oidc_subject     = "repo:${local.github_repository_parts[0]}@${var.github_owner_id}/${local.github_repository_parts[1]}@${var.github_repository_id}:environment:dev"
 }
 
 resource "aws_s3_bucket" "state" {
@@ -115,7 +130,7 @@ resource "aws_iam_role" "deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:environment:dev"
+          "token.actions.githubusercontent.com:sub" = local.github_oidc_subject
         }
       }
     }]
@@ -213,4 +228,9 @@ output "github_environment_variables" {
     TF_STATE_BUCKET = aws_s3_bucket.state.id
     TF_STATE_KEY    = local.state_key
   }
+}
+
+output "github_oidc_subject" {
+  description = "Expected GitHub OIDC subject in the deployment role trust policy."
+  value       = local.github_oidc_subject
 }
