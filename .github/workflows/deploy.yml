@@ -66,6 +66,7 @@ jobs:
       TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
       TF_VAR_project: ${{ vars.PROJECT || 'streamer-stats' }}
       TF_VAR_environment: dev
+      TF_VAR_postgres_backup_retention_days: ${{ vars.POSTGRES_BACKUP_RETENTION_DAYS || '1' }}
     steps:
       - uses: actions/checkout@v7
       - name: Check deployment configuration

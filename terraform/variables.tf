@@ -70,6 +70,17 @@ variable "postgres_engine_version" {
   default     = "17.6"
 }
 
+variable "postgres_backup_retention_days" {
+  description = "Days to retain automated backups (0 disables them). Your AWS account plan may limit the maximum."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.postgres_backup_retention_days >= 0 && var.postgres_backup_retention_days <= 35 && floor(var.postgres_backup_retention_days) == var.postgres_backup_retention_days
+    error_message = "Backup retention must be a whole number between 0 and 35 days."
+  }
+}
+
 variable "lambda_artifact_directory" {
   description = "Directory containing your six prebuilt Lambda ZIP files, relative to this Terraform folder or absolute."
   type        = string
