@@ -42,6 +42,7 @@ Set these environment **variables** using the bootstrap output:
 | `PROJECT` | Resource name prefix; defaults to `streamer-stats` |
 | `TF_STATE_BUCKET` | Bootstrap S3 bucket name |
 | `TF_STATE_KEY` | Application state key, normally `streamer-stats/dev/terraform.tfstate` |
+| `POSTGRES_BACKUP_RETENTION_DAYS` | Optional automated backup retention; defaults to `1` day |
 
 No AWS access keys need to be stored in GitHub. Only the deployment job can request an OIDC token; pull request checks do not assume the AWS role. Deployment jobs run one at a time and use [S3 state locking](https://developer.hashicorp.com/terraform/language/backend/s3). Each job applies the plan it just generated.
 
@@ -59,6 +60,12 @@ terraform -chdir=terraform init -migrate-state \
 For a new application deployment or a fresh clone, use the same command without `-migrate-state`. Local Terraform commands and GitHub must use the same bucket, key, region, project, and environment. Build the Lambda ZIPs before running a plan. The [provider lock files](../terraform/.terraform.lock.hcl) pin the AWS provider used locally and in CI; commit updates after intentionally upgrading it.
 
 Create the existing SSM parameters listed in `terraform/variables.tf` before implementing or invoking handlers that read them. The workflow provisions infrastructure and uploads the ZIPs; it does not populate application secrets or apply `db/schema.sql`.
+
+## RDS backup retention restrictions
+
+The database defaults to one day of automated backup retention. AWS free-plan accounts can reject longer retention with `FreeTierRestrictionError`; the previous seven-day setting triggered this restriction. The [RDS backup retention documentation](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.BackupRetention.html) explains the retention settings and their effect on backups.
+
+Push the updated configuration to `main` to start a new deployment using one-day retention. An existing `POSTGRES_BACKUP_RETENTION_DAYS` GitHub environment variable must also be within your account's allowed range. To request longer retention on an account that supports it, set that GitHub environment variable or override `postgres_backup_retention_days` when running Terraform locally. Setting retention to `0` disables automated backups.
 
 ## OIDC authentication errors
 
