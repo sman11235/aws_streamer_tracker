@@ -25,7 +25,7 @@ terraform -chdir=terraform/bootstrap plan \
   -out=bootstrap.tfplan
 ```
 
-For another repository, region, or project prefix, pass `-var='github_repository=owner/repo'`, `-var='aws_region=REGION'`, or `-var='project=PREFIX'` when planning. Use the resulting output values in GitHub.
+For another repository, set `github_repository`, `github_owner_id`, and `github_repository_id` when planning. The defaults match this repository's immutable GitHub IDs. The public GitHub API endpoint `https://api.github.com/repos/OWNER/REPO` returns the owner ID in `owner.id` and repository ID in `id`. For another region or project prefix, pass `-var='aws_region=REGION'` or `-var='project=PREFIX'`. Use the resulting output values in GitHub.
 
 The deployment role trusts only this repository's `dev` environment through [GitHub OIDC](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws). Its state access is limited to the application state and lock objects. IAM role management is limited to the project's `dev` role prefix, and managed policy attachments are limited to the two AWS Lambda execution policies used by this stack. Infrastructure permissions cover the AWS services used by the application across the account; use a dedicated development account or adapt the policy to your account's resource restrictions.
 
@@ -59,3 +59,21 @@ terraform -chdir=terraform init -migrate-state \
 For a new application deployment or a fresh clone, use the same command without `-migrate-state`. Local Terraform commands and GitHub must use the same bucket, key, region, project, and environment. Build the Lambda ZIPs before running a plan. The [provider lock files](../terraform/.terraform.lock.hcl) pin the AWS provider used locally and in CI; commit updates after intentionally upgrading it.
 
 Create the existing SSM parameters listed in `terraform/variables.tf` before implementing or invoking handlers that read them. The workflow provisions infrastructure and uploads the ZIPs; it does not populate application secrets or apply `db/schema.sql`.
+
+## OIDC authentication errors
+
+Repositories created after July 15, 2026 use [immutable OIDC subjects](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims). This repository's deployment subject is:
+
+```text
+repo:sman11235@157008436/aws_streamer_tracker@1379103315:environment:dev
+```
+
+If deployment fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity` after using an older bootstrap, update the AWS role's trust policy by applying the current bootstrap from the working copy containing its state:
+
+```sh
+terraform -chdir=terraform/bootstrap plan -out=bootstrap.tfplan
+terraform -chdir=terraform/bootstrap apply bootstrap.tfplan
+terraform -chdir=terraform/bootstrap output -raw github_oidc_subject
+```
+
+Check that the plan updates the deployment role's trust policy, then rerun the failed GitHub Actions deployment. The workflow's `AWS_ROLE_ARN` must identify this bootstrap's deployment role, its environment must be `dev`, and the OIDC audience must be `sts.amazonaws.com`. Repositories using the legacy subject format or a custom subject template must adapt the trust condition to match their actual token subject exactly.
