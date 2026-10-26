@@ -14,6 +14,18 @@ TERMINAL_TWITCH = set(CONFIG["twitch"]["terminal_subscription_statuses"])
 
 
 def configured_callback(name):
+    """Resolve a callback environment binding and validate its public HTTPS shape.
+
+    Require a hostname and port 443, with no query or fragment in the base URL.
+    Raise ValueError for invalid callback configuration.
+
+    Args:
+        name (str): Logical runtime-YAML environment binding identifying the platform
+            callback base URL.
+
+    Returns:
+        str: Validated HTTPS callback base URL on port 443, without query or fragment.
+    """
     value = environment(name)
     parts = urlsplit(value)
     if parts.scheme != "https" or not parts.hostname or parts.port not in {None, 443} or parts.query or parts.fragment:
@@ -22,6 +34,22 @@ def configured_callback(name):
 
 
 def retry_later(store, sub, error):
+    """Persist exponential retry backoff and a safe error summary for a subscription.
+
+    Increment the attempt counter and honor longer API retry delays. Log only
+    the subscription ID and error class; do not sleep inside the invocation.
+
+    Args:
+        store (Store): Database adapter used to persist retry state.
+        sub (Mapping[str, Any]): Subscription row containing its local id and previous
+            attempt_count.
+        error (Exception): Failure that triggered backoff; ApiError may supply a longer
+            retry delay.
+
+    Returns:
+        None: The retry timestamp, attempt count, and safe error summary are saved and
+            logged.
+    """
     attempt = sub["attempt_count"] + 1
     settings = CONFIG["subscriptions"]
     delay = min(settings["retry_max_seconds"], settings["retry_base_seconds"] * 2 ** min(attempt, settings["retry_exponent_cap"]))
@@ -35,10 +63,47 @@ def retry_later(store, sub, error):
 
 
 def ready(sub, now):
+    """Return whether the subscription has no retry delay or its delay has elapsed.
+
+    Args:
+        sub (Mapping[str, Any]): Subscription row containing an optional timezone-aware
+            retry_at timestamp.
+        now (datetime.datetime): Timezone-aware current time used to compare the retry
+            deadline.
+
+    Returns:
+        bool: True when no retry is scheduled or the retry deadline has passed.
+    """
     return not sub.get("retry_at") or sub["retry_at"] <= now
 
 
 def websub(event, context, *, store_factory=Store.open, aws=AWS_CLIENT, http=HTTP_CLIENT):
+    """Reconcile tracked YouTube channels with their WebSub registrations.
+
+    Create missing local records, renew due leases, enforce the configured
+    maximum age since verification, and unsubscribe undesired registrations.
+    Persist pending state before hub requests so immediate callbacks can verify
+    it. Seed recent public videos once after registration and preserve progress
+    when another channel fails. A hub's acceptance is not verification.
+
+    Args:
+        event (dict[str, Any]): Scheduler payload; no event fields are required.
+        context (LambdaContext | None): Invocation context used to stop work before
+            timeout, or None for local execution.
+        store_factory (Callable[[], ContextManager[Store]]): Factory opening a
+            context-managed subscription store.
+        aws (AWS): Injectable adapter resolving the signing secret and publishing seeded
+            video events.
+        http (HTTP): Injectable HTTP client for hub registration requests and
+            recent-feed downloads.
+
+    Returns:
+        dict[str, int | str]: Attempted/failed/deferred counters, or a skipped reason
+            for an overlapping manager.
+
+    Raises:
+        RuntimeError: An attempt failed after its retry state was persisted.
+    """
     started = time.monotonic()
     base = configured_callback("youtube_callback")
     secret, version = aws.setting("youtube_secret")
@@ -59,6 +124,10 @@ def websub(event, context, *, store_factory=Store.open, aws=AWS_CLIENT, http=HTT
                 continue
             if sub["desired"]:
                 due = sub["renew_at"] is None or sub["renew_at"] <= now
+                # Enforce the age cap for existing rows too, even if their
+                # stored renewal date was calculated from a much longer lease.
+                verified_at = sub.get("verified_at")
+                due = due or verified_at is None or now >= verified_at + timedelta(seconds=CONFIG["youtube"]["max_refresh_interval_seconds"])
                 due = due or sub["secret_version"] != version or sub["callback_url"] != base
                 due = due or sub["seeded_at"] is None
                 if not due:
@@ -111,6 +180,18 @@ def websub(event, context, *, store_factory=Store.open, aws=AWS_CLIENT, http=HTT
 
 
 def owned_remote(remote, sub):
+    """Return whether a Twitch registration matches this channel, type, and callback.
+
+    Args:
+        remote (Mapping[str, Any]): Twitch API subscription object whose ownership
+            should be checked.
+        sub (Mapping[str, Any]): Local subscription/channel fields defining expected
+            type, version, broadcaster, and callback.
+
+    Returns:
+        bool: Whether every ownership-defining remote field matches this local
+            registration.
+    """
     return (
         remote.get("type") == sub["event_type"] and remote.get("version") == sub["version"]
         and remote.get("condition", {}).get("broadcaster_user_id") == sub["platform_channel_id"]
@@ -120,6 +201,17 @@ def owned_remote(remote, sub):
 
 
 def delete_remote(platforms, remote):
+    """Delete a Twitch registration, treating HTTP 404 as already removed.
+
+    Args:
+        platforms (Platforms): Twitch API adapter used to delete the remote
+            subscription.
+        remote (Mapping[str, Any]): Remote subscription object containing its Twitch id.
+
+    Returns:
+        None: The subscription was deleted or already absent; other API errors
+            propagate.
+    """
     try:
         platforms.twitch("DELETE", CONFIG["twitch"]["subscriptions_path"], params={"id": remote["id"]})
     except ApiError as error:
@@ -128,6 +220,31 @@ def delete_remote(platforms, remote):
 
 
 def eventsub(event, context, *, store_factory=Store.open, aws=AWS_CLIENT, platforms=PLATFORMS):
+    """Reconcile online/offline Twitch registrations for tracked broadcasters.
+
+    List remote subscriptions, adopt healthy owned matches, replace changed
+    callbacks or signing keys, and remove undesired owned registrations. Keep
+    verification callbacks authoritative if they race the create response.
+    Respect retry delays, per-invocation limits, and terminal revocation states.
+
+    Args:
+        event (dict[str, Any]): Scheduler payload; no event fields are required.
+        context (LambdaContext | None): Invocation context used to reserve completion
+            time, or None for local execution.
+        store_factory (Callable[[], ContextManager[Store]]): Factory opening a
+            context-managed subscription store.
+        aws (AWS): Injectable adapter resolving the Twitch signing secret and its SSM
+            version.
+        platforms (Platforms): Injectable Twitch client used to list, create, and delete
+            EventSub registrations.
+
+    Returns:
+        dict[str, int | str]: Created/enabled/removed/failed/deferred counters, or an
+            overlapping-job skip reason.
+
+    Raises:
+        RuntimeError: Reconciliation failures remain after saving retry state.
+    """
     started = time.monotonic()
     base = configured_callback("twitch_callback")
     secret, version = aws.setting("twitch_secret")

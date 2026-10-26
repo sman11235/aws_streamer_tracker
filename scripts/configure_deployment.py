@@ -11,7 +11,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def deployment_environment(config, environ):
-    """Match Terraform precedence, preserving false and zero overrides."""
+    """Resolve YAML deployment defaults and explicit process overrides.
+
+    Args:
+        config (Mapping[str, Any]): Parsed infrastructure YAML containing Terraform
+            defaults under variables.
+        environ (Mapping[str, str]): Process settings containing optional TF_VAR_*
+            overrides and AWS_REGION.
+
+    Returns:
+        dict[str, str]: Serialized Terraform/AWS environment entries suitable for a
+            GitHub environment file.
+
+    Raises:
+        ValueError: A value contains a newline or AWS/Terraform regions disagree.
+    """
     result = {}
     for name, default in config["variables"].items():
         override = environ.get(f"TF_VAR_{name}")
@@ -30,6 +44,11 @@ def deployment_environment(config, environ):
 
 
 def main():
+    """Append resolved deployment defaults and overrides to the GitHub GITHUB_ENV file.
+
+    Returns:
+        None: Append resolved deployment variables to the file named by GITHUB_ENV.
+    """
     with (ROOT / "config/infrastructure.yaml").open(encoding="utf-8") as source:
         config = yaml.safe_load(source)
     values = deployment_environment(config, os.environ)

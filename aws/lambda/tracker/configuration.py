@@ -16,7 +16,7 @@ REQUIRED_KEYS = {
     "jobs": "remaining_time_reserve_seconds local_time_budget_seconds",
     "channel_updates": "youtube_batch_size twitch_batch_size",
     "subscriptions": "batch_size pending_retry_seconds verification_timeout_seconds retry_base_seconds retry_max_seconds retry_exponent_cap",
-    "youtube": "hub_url feed_url videos_url channels_url channel_parts video_parts requested_lease_seconds renewal_fraction max_accepted_lease_seconds polling_batch_size thumbnail_priority",
+    "youtube": "hub_url feed_url videos_url channels_url channel_parts video_parts requested_lease_seconds renewal_fraction max_refresh_interval_seconds max_accepted_lease_seconds polling_batch_size thumbnail_priority",
     "twitch": "helix_url token_url token_validation_url subscriptions_path streams_path users_path token_validation_interval_seconds token_expiry_margin_seconds authorization_attempts subscription_page_size polling_batch_size message_max_age_seconds message_future_tolerance_seconds revocation_retry_seconds terminal_subscription_statuses thumbnail_width thumbnail_height",
     "webhooks": "max_body_bytes",
     "events": "source_prefix detail_type",
@@ -25,7 +25,22 @@ REQUIRED_KEYS = {
 
 
 def load_config(path):
-    """Fail at startup for missing settings and invalid operational limits."""
+    """Load and validate a complete non-secret runtime YAML configuration.
+
+    Args:
+        path (str | pathlib.Path): Filesystem path of a complete runtime YAML file, from
+            the checkout or packaged Lambda.
+
+    Returns:
+        dict[str, Any]: Validated non-secret configuration grouped into the required
+            runtime sections.
+
+    Raises:
+        ValueError: Settings are missing, unknown, mistyped, or outside supported
+            operational/protocol limits.
+        OSError: The configuration file cannot be opened.
+        yaml.YAMLError: The file is not valid YAML.
+    """
     with Path(path).open(encoding="utf-8") as source:
         config = yaml.safe_load(source)
     if not isinstance(config, dict):
@@ -95,7 +110,20 @@ def load_config(path):
 
 
 def environment(name, default=None):
-    """Resolve a logical resource/secret binding to its process environment."""
+    """Resolve a logical YAML binding to a process environment value.
+
+    Use a non-None default when the variable is absent; otherwise require the
+    variable. Raise KeyError for an unknown binding or a missing required value.
+
+    Args:
+        name (str): Logical binding key under the runtime configuration environment
+            section.
+        default (str | None): Fallback value for an absent variable; None requires the
+            variable to exist.
+
+    Returns:
+        str: Resolved process environment value, or the supplied non-None fallback.
+    """
     variable = CONFIG["environment"][name]
     return os.environ[variable] if default is None else os.environ.get(variable, default)
 

@@ -17,6 +17,20 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main():
+    """Build deployment ZIPs for every function in the selected YAML build config.
+
+    Parse CLI paths, validate source/runtime configuration and wheel targets,
+    bundle the shared package and runtime YAML, download the public RDS CA bundle,
+    and install pinned dependencies once for reuse. Write archives with stable
+    metadata so unchanged inputs do not produce timestamp-only differences.
+
+    Raise SystemExit for invalid CLI/configuration inputs; dependency installer
+    failures propagate. This command builds artifacts and never deploys them.
+
+    Returns:
+        None: Write every configured Lambda ZIP and print its path; parse CLI options
+            from sys.argv.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",

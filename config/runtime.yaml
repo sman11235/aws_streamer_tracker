@@ -43,6 +43,7 @@ youtube:
   video_parts: [snippet, liveStreamingDetails]
   requested_lease_seconds: 432000
   renewal_fraction: 0.8
+  max_refresh_interval_seconds: 432000  # Mandatory renewal deadline: five days.
   max_accepted_lease_seconds: 31536000
   polling_batch_size: 50
   thumbnail_priority: [maxres, high, medium, default]

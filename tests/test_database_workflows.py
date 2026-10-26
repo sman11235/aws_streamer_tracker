@@ -25,6 +25,16 @@ ROOT = Path(__file__).resolve().parents[1]
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_HOST"), "Set TEST_DATABASE_HOST for PostgreSQL integration tests")
 class DatabaseWorkflowTests(unittest.TestCase):
     def connect(self):
+        """Connect to the isolated PostgreSQL test server and select this test schema.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            pg8000.dbapi.Connection: Autocommit connection to the isolated database with
+                this test schema selected.
+        """
         import pg8000.dbapi
         connection = pg8000.dbapi.connect(
             host=os.environ["TEST_DATABASE_HOST"], port=int(os.environ.get("TEST_DATABASE_PORT", "5432")),
@@ -37,9 +47,27 @@ class DatabaseWorkflowTests(unittest.TestCase):
         return connection
 
     def open_store(self):
+        """Return a new Store connected to the current test schema.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            Store: New store owning a connection to the current isolated schema.
+        """
         return Store(self.connect())
 
     def setUp(self):
+        """Create a random isolated schema, apply all migrations, and insert a test streamer.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Prepare fixture state on this test instance before each test.
+        """
         self.schema = "test_" + uuid4().hex
         self.store = self.open_store()
         self.store.query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
@@ -53,15 +81,46 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.aws = aws_mock()
 
     def tearDown(self):
+        """Drop only this test schema and close its database connection.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Release this test instance's temporary database resources.
+        """
         self.store.query("SET search_path TO public")
         self.store.query(f'DROP SCHEMA "{self.schema}" CASCADE')
         self.store.connection.close()
 
     def migrate(self):
+        """Apply every numbered SQL migration in filename order to the test database.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Execute every numbered SQL migration against the isolated test schema.
+        """
         for migration in sorted((ROOT / "db/migrations").glob("*.sql")):
             self.store.query(migration.read_text())
 
     def channel(self, platform="TWITCH", platform_id=None):
+        """Insert and return a tracked channel fixture for the selected platform and ID.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+            platform (str): TWITCH or YOUTUBE platform enum value for the fixture row.
+            platform_id (str | None): Canonical provider channel ID, or None for the
+                platform-specific fixture default.
+
+        Returns:
+            dict[str, Any]: Inserted tracked channel row, including its generated local
+                UUID.
+        """
         return self.store.query(
             """INSERT INTO channels (vtuber_id,platform,platform_channel_id,channel_name)
                VALUES (%s,%s,%s,'test') RETURNING *""",
@@ -69,6 +128,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         )[0]
 
     def test_refresh_discovers_new_streamer_channels_and_records_history(self):
+        """Verify streamer IDs alone create both platform channels and matching metadata history.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         # No channels rows and the has_* flags retain their default false values.
         self.store.query(
             """INSERT INTO streamer_info
@@ -89,6 +158,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history")[0]["n"], 2)
 
     def test_existing_streamer_new_platform_is_discovered_on_scheduled_retry(self):
+        """Verify a newly linked platform is discovered on retry without reprocessing completed history.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         self.store.query("UPDATE streamer_info SET youtube_channel_id = 'UC-channel' WHERE id = %s", (self.vtuber,))
         platforms = MagicMock()
         platforms.youtube_channels.return_value = {"UC-channel": youtube_channel_item()}
@@ -107,6 +186,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.discover_channels(), 0)
 
     def test_discovery_preserves_explicitly_untracked_channels(self):
+        """Verify rediscovery does not reactivate or refresh explicitly untracked channel rows.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         self.store.query("UPDATE channels SET is_tracked = FALSE WHERE id = %s", (channel["id"],))
         self.store.query("UPDATE streamer_info SET youtube_channel_id = 'UC-channel' WHERE id = %s", (self.vtuber,))
@@ -117,6 +206,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         platforms.youtube_channels.assert_not_called()
 
     def test_discovery_ignores_empty_ids_and_uses_streamer_name_until_metadata_arrives(self):
+        """Verify blank IDs are ignored and new rows use streamer names until metadata is fetched.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         self.store.query(
             "UPDATE streamer_info SET youtube_channel_id = '   ', twitch_channel_id = NULL, has_youtube = TRUE WHERE id = %s",
             (self.vtuber,),
@@ -130,6 +229,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertTrue(row["is_tracked"])
 
     def test_discovery_does_not_reassign_existing_channel_ownership(self):
+        """Verify conflicting streamer IDs cannot take ownership of an existing channel.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         self.store.query(
             """INSERT INTO streamer_info
@@ -141,6 +250,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channels")[0]["n"], 1)
 
     def test_discovery_keeps_previous_channel_history_when_streamer_adds_new_id(self):
+        """Verify discovering a replacement ID preserves the previous channel and its history.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         self.store.save_channel_snapshot(channel["id"], youtube_channel(youtube_channel_item()), utcnow(), "old")
         self.store.query("UPDATE streamer_info SET youtube_channel_id = 'UC-new' WHERE id = %s", (self.vtuber,))
@@ -149,6 +268,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history WHERE channel_id = %s", (channel["id"],))[0]["n"], 1)
 
     def test_channel_metadata_and_history_are_updated_together(self):
+        """Verify current channel fields and history contain the same committed observation.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         observed = utcnow()
         metadata = youtube_channel(youtube_channel_item())
@@ -161,10 +290,32 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(current["last_updated"], history["observed_at"])
 
     def test_channel_history_rolls_back_when_current_update_fails(self):
+        """Verify a failed current-channel update also rolls back its newly inserted history row.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         original = self.store.query
 
         def query(sql, values=()):
+            """Execute real SQL except the injected channel-update failure used to verify rollback.
+
+            Args:
+                sql (str): SQL statement to execute, except channel metadata updates fail
+                    deliberately.
+                values (Sequence[Any]): Bound parameters forwarded unchanged to the real store
+                    query method.
+
+            Returns:
+                list[dict[str, Any]]: Real query result rows when the simulated failure is not
+                    triggered.
+            """
             if "UPDATE channels SET channel_name" in sql:
                 raise RuntimeError("simulated update failure")
             return original(sql, values)
@@ -175,6 +326,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history")[0]["n"], 0)
 
     def test_scheduled_channel_retry_skips_completed_channels(self):
+        """Verify a scheduled retry skips completed API lookups and preserves actual observation times.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         platforms = MagicMock()
         platforms.youtube_channels.return_value = {"UC-channel": youtube_channel_item()}
@@ -189,6 +350,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.channel(channel["id"])["last_updated"], history[0]["observed_at"])
 
     def test_distinct_channel_runs_record_history_even_when_unchanged(self):
+        """Verify separate runs retain unchanged snapshots and repeated migrations preserve them.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         metadata = youtube_channel(youtube_channel_item())
         first = utcnow()
@@ -199,6 +370,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history")[0]["n"], 2)
 
     def test_late_and_untracked_channel_snapshots_do_not_write_history(self):
+        """Verify stale observations and newly untracked channels do not append history.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         metadata = youtube_channel(youtube_channel_item())
         now = utcnow()
@@ -209,6 +390,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history")[0]["n"], 1)
 
     def test_missing_channel_does_not_starve_unattempted_channels(self):
+        """Verify previously attempted metadata rows sort behind channels not yet attempted.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         first = self.channel("YOUTUBE")
         second = self.channel("YOUTUBE", "UC-second")
         self.store.mark_metadata_attempt([first["id"]], utcnow())
@@ -216,6 +407,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual([str(row["id"]) for row in rows], [str(second["id"]), str(first["id"])])
 
     def test_channel_hidden_subscribers_clear_unavailable_count_without_fabricated_zero(self):
+        """Verify hidden subscriber totals become null while genuine zero views remain zero.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         self.store.query("UPDATE channels SET subscriber_count = 12300 WHERE id = %s", (channel["id"],))
         metadata = youtube_channel(youtube_channel_item(statistics={"hiddenSubscriberCount": True, "viewCount": "0"}))
@@ -227,11 +428,31 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(history["total_views"], 0)
 
     def test_migration_can_be_applied_twice_without_losing_channels(self):
+        """Verify reapplying migrations preserves existing channel records and tracking state.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel()
         self.migrate()
         self.assertTrue(self.store.channel(channel["id"])["is_tracked"])
 
     def test_receipt_and_mutations_roll_back_together(self):
+        """Verify a transaction failure removes both its event receipt and related database mutation.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel()
         with self.assertRaises(RuntimeError), self.store.atomic():
             self.assertTrue(self.store.receipt("twitch", "event"))
@@ -241,6 +462,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertTrue(self.store.channel(channel["id"])["is_tracked"])
 
     def test_samples_are_idempotent_and_aggregates_are_incremental(self):
+        """Verify duplicate samples are ignored and running CCV count, sum, peak, and mean are correct.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel()
         now = utcnow()
         video = {"id": "stream-1", "title": "Live", "status": "LIVE"}
@@ -252,6 +483,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual((row["ccv_sample_count"], row["ccv_sample_sum"], row["peak_ccv"], row["avg_ccv"]), (3, 40, 30, 13))
 
     def test_late_snapshot_does_not_overwrite_newer_video(self):
+        """Verify an older live snapshot cannot replace a newer ended video record.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         now = utcnow()
         self.store.upsert_video(channel["id"], {"id": "one", "title": "New", "status": "ENDED"}, now)
@@ -260,6 +501,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT title, stream_status FROM videos")[0], {"title": "New", "stream_status": "ENDED"})
 
     def test_late_offline_event_reconciles_current_broadcast_and_duplicates_skip_api(self):
+        """Verify delayed offline events preserve a newer broadcast and duplicate events skip API calls.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel()
         old = {"id": "old", "title": "Old", "status": "LIVE"}
         apply_snapshot(self.store, channel, utcnow() - timedelta(minutes=5), old, provider="twitch")
@@ -277,10 +528,33 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(rows, {"old": "ENDED", "new": "LIVE"})
 
     def test_websub_verification_can_arrive_before_registration_returns(self):
+        """Verify a hub callback can commit verification before the registration request returns.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         self.channel("YOUTUBE")
         http = MagicMock()
 
         def request(method, url, **kwargs):
+            """Simulate immediate hub verification on POST and return a seed feed on GET.
+
+            Args:
+                method (str): Simulated hub request method; POST triggers verification and GET
+                    returns a seed feed.
+                url (str): Requested hub/feed URL accepted for compatibility with the HTTP
+                    adapter interface.
+                **kwargs (dict[str, Any]): HTTP request options; the POST form supplies
+                    callback, topic, and registration details.
+
+            Returns:
+                bytes: Empty registration response bytes or UTF-8 Atom seed-feed bytes.
+            """
             if method == "POST":
                 form = kwargs["form"]
                 query = {key: value[0] for key, value in parse_qs(urlsplit(form["hub.callback"]).query).items()}
@@ -302,12 +576,34 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(sub["seeded_at"])
 
     def test_eventsub_verification_race_and_reconciliation(self):
+        """Verify early Twitch verification survives the later pending create response and reconciliation.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         self.channel()
         platforms = MagicMock()
         remote = []
         platforms.twitch_subscriptions.side_effect = lambda: remote
 
         def create(method, path, **kwargs):
+            """Simulate a Twitch create request whose verification callback arrives before its response.
+
+            Args:
+                method (str): HTTP method accepted by the fake Twitch API call interface.
+                path (str): Helix resource path accepted by the fake API call interface.
+                **kwargs (dict[str, Any]): Request options containing the subscription payload
+                    and verification callback details.
+
+            Returns:
+                dict[str, Any]: Twitch create-response fixture returned after its verification
+                    callback commits.
+            """
             payload = kwargs["payload"]
             sub_id = parse_qs(urlsplit(payload["transport"]["callback"]).query)["subscription_id"][0]
             sub = self.store.subscription(sub_id)
@@ -329,6 +625,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(platforms.twitch.call_count, 2)
 
     def test_poller_preserves_missing_youtube_viewer_counts(self):
+        """Verify a live transition without YouTube viewer data creates no fabricated CCV sample.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel("YOUTUBE")
         self.store.upsert_video(channel["id"], {"id": "video", "title": "Upcoming", "status": "SCHEDULED"}, utcnow())
         platforms = MagicMock()
@@ -341,6 +647,16 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.query("SELECT stream_status FROM videos")[0]["stream_status"], "LIVE")
 
     def test_untracking_keeps_historical_data(self):
+        """Verify stopping tracking disables desired subscriptions without deleting video history.
+
+        Args:
+            self (DatabaseWorkflowTests): Test-case instance containing fixtures, injected
+                adapters, and assertion helpers.
+
+        Returns:
+            None: Assertions complete without returning a value; failures raise a test
+                assertion error.
+        """
         channel = self.channel()
         self.store.upsert_video(channel["id"], {"id": "one", "title": "Old", "status": "ENDED"}, utcnow())
         self.store.ensure_subscription(channel, "stream.online", "https://example.com/twitch/webhook")

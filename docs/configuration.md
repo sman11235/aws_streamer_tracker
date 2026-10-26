@@ -16,6 +16,8 @@ The builder validates runtime YAML and includes it as `tracker/config.yaml` in e
 
 Changing runtime YAML requires rebuilding and deploying the affected ZIPs. Python no longer reads `WEBSUB_LEASE_SECONDS`, `SUBSCRIPTION_BATCH_SIZE`, or `DATABASE_SSLMODE`; use `youtube.requested_lease_seconds`, `subscriptions.batch_size`, and `database.ssl_mode` instead. TLS defaults to certificate and hostname verification.
 
+`youtube.max_refresh_interval_seconds` is 432000 (five days). WebSub renewal is due at the earlier of that age since verification or `youtube.renewal_fraction` of the granted lease. This controls each subscription's deadline; the maintenance job still runs every ten minutes.
+
 API field names, XML namespaces, signature algorithms, status codes, SQL, and IAM permission definitions remain code because they define protocols and application behavior.
 
 ## Infrastructure and overrides
