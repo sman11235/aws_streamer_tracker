@@ -1,0 +1,84 @@
+# Terraform reads this directly. Existing -var / TF_VAR_* inputs override variables.
+variables:
+  aws_region: us-east-1
+  project: streamer-stats
+  environment: dev
+  youtube_websub_secret_parameter: /streamer-stats/youtube-websub-secret
+  twitch_secret_parameter: /streamer-stats/twitch-eventsub-secret
+  twitch_client_id_parameter: /streamer-stats/twitch-client-id
+  twitch_client_secret_parameter: /streamer-stats/twitch-client-secret
+  youtube_api_key_parameter: /streamer-stats/youtube-api-key
+  tracking_jobs_enabled: false
+  alarm_topic_arn: ""
+  vpc_cidr: 10.42.0.0/16
+  postgres_database_name: streamer_tracker
+  postgres_master_username: streamer_admin
+  postgres_instance_class: db.t4g.micro
+  postgres_engine_version: "17.6"
+  postgres_backup_retention_days: 1
+  lambda_artifact_directory: artifacts
+lambda:
+  runtime: python3.12
+  architectures: [arm64]
+  timeout_seconds: 120
+  memory_mb: 256
+  memory_overrides_mb:
+    get-stream-stats: 512
+  log_retention_days: 14
+  event_publishers: [subscribe-to-websub, handle-youtube-notifs, handle-twitch-notifs]
+  async_functions: [subscribe-to-websub, subscribe-to-eventsub, handle-stream-events, get-stream-stats, update-channels]
+network:
+  availability_zone_count: 2
+  subnet_newbits: 8
+  private_subnet_offset: 10
+  outbound_cidr: 0.0.0.0/0
+  https_port: 443
+database:
+  allocated_storage_gb: 20
+  max_allocated_storage_gb: 100
+  storage_type: gp3
+  storage_encrypted: true
+  publicly_accessible: false
+  multi_az: false
+  backup_window: "03:00-04:00"
+  maintenance_window: "sun:04:00-sun:05:00"
+  deletion_protection: false
+  skip_final_snapshot: true
+  apply_immediately: true
+api:
+  log_retention_days: 14
+  payload_format_version: "2.0"
+  callback_paths:
+    youtube: /youtube/webhook
+    twitch: /twitch/webhook
+schedules:
+  timezone: UTC
+  jobs:
+    renew-youtube:
+      lambda: subscribe-to-websub
+      expression: rate(10 minutes)
+    renew-twitch:
+      lambda: subscribe-to-eventsub
+      expression: rate(10 minutes)
+    poll-live-streams:
+      lambda: get-stream-stats
+      expression: rate(2 minutes)
+    update-channel-history:
+      lambda: update-channels
+      expression: cron(0 * * * ? *)
+delivery:
+  failure_queue_retention_seconds: 1209600
+  scheduler:
+    max_retry_attempts: 2
+    max_event_age_seconds: 300
+  lambda_async:
+    max_retry_attempts: 2
+    max_event_age_seconds: 3600
+  eventbridge:
+    max_retry_attempts: 185
+    max_event_age_seconds: 86400
+monitoring:
+  period_seconds: 300
+  evaluation_periods: 1
+  threshold: 1
+  treat_missing_data: notBreaching

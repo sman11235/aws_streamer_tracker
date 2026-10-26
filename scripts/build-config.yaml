@@ -1,3 +1,14 @@
+shared_directory: ../aws/lambda/tracker
+runtime_requirements: ../aws/lambda/requirements.lock
+runtime_config: ../config/runtime.yaml
+infrastructure_config: ../config/infrastructure.yaml
+rds_ca_bundle_url: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+rds_ca_bundle_archive_path: tracker/rds-ca.pem
+download_timeout_seconds: 30
+python_version: "3.12"
+pip_platform: manylinux2014_aarch64
+uv_platform: aarch64-manylinux2014
+python_implementation: cp
 functions:
   subscribe-to-websub: ../aws/lambda/subscribe_to_websub.py
   subscribe-to-eventsub: ../aws/lambda/subscribe_to_eventsub.py
@@ -5,3 +16,4 @@ functions:
   handle-twitch-notifs: ../aws/lambda/handle_twitch_notifs.py
   handle-stream-events: ../aws/lambda/handle_stream_events.py
   get-stream-stats: ../aws/lambda/get_stream_stats.py
+  update-channels: ../aws/lambda/update_channels.py

@@ -11,11 +11,11 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region = local.settings.aws_region
   default_tags {
     tags = {
-      Project     = var.project
-      Environment = "dev"
+      Project     = local.settings.project
+      Environment = local.bootstrap.environment
       ManagedBy   = "Terraform"
     }
   }
@@ -23,30 +23,30 @@ provider "aws" {
 
 variable "aws_region" {
   type    = string
-  default = "us-east-1"
+  default = null
 }
 
 variable "project" {
   type    = string
-  default = "streamer-stats"
+  default = null
 }
 
 variable "github_repository" {
   description = "GitHub owner/repository allowed to deploy."
   type        = string
-  default     = "sman11235/aws_streamer_tracker"
+  default     = null
 }
 
 variable "github_owner_id" {
   description = "Immutable numeric GitHub owner ID used in the OIDC subject."
   type        = string
-  default     = "157008436"
+  default     = null
 }
 
 variable "github_repository_id" {
   description = "Immutable numeric GitHub repository ID used in the OIDC subject."
   type        = string
-  default     = "1379103315"
+  default     = null
 }
 
 variable "existing_oidc_provider_arn" {
@@ -59,16 +59,16 @@ data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 locals {
-  prefix    = "${var.project}-dev"
-  state_key = "${var.project}/dev/terraform.tfstate"
-  oidc_arn  = var.existing_oidc_provider_arn != null ? var.existing_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
+  prefix    = "${local.settings.project}-${local.bootstrap.environment}"
+  state_key = "${local.settings.project}/${local.bootstrap.environment}/terraform.tfstate"
+  oidc_arn  = local.settings.existing_oidc_provider_arn != null ? local.settings.existing_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
 
-  github_repository_parts = split("/", var.github_repository)
-  github_oidc_subject     = "repo:${local.github_repository_parts[0]}@${var.github_owner_id}/${local.github_repository_parts[1]}@${var.github_repository_id}:environment:dev"
+  github_repository_parts = split("/", local.settings.github_repository)
+  github_oidc_subject     = "repo:${local.github_repository_parts[0]}@${local.settings.github_owner_id}/${local.github_repository_parts[1]}@${local.settings.github_repository_id}:environment:${local.bootstrap.environment}"
 }
 
 resource "aws_s3_bucket" "state" {
-  bucket = "${local.prefix}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-tfstate"
+  bucket = "${local.prefix}-${data.aws_caller_identity.current.account_id}-${local.settings.aws_region}-tfstate"
 
   lifecycle {
     prevent_destroy = true
@@ -114,9 +114,9 @@ resource "aws_s3_bucket_policy" "state" {
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
-  count          = var.existing_oidc_provider_arn == null ? 1 : 0
-  url            = "https://token.actions.githubusercontent.com"
-  client_id_list = ["sts.amazonaws.com"]
+  count          = local.settings.existing_oidc_provider_arn == null ? 1 : 0
+  url            = local.bootstrap.oidc.issuer_url
+  client_id_list = [local.bootstrap.oidc.audience]
 }
 
 resource "aws_iam_role" "deploy" {
@@ -129,8 +129,8 @@ resource "aws_iam_role" "deploy" {
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = {
-          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = local.github_oidc_subject
+          "${local.oidc_host}:aud" = local.bootstrap.oidc.audience
+          "${local.oidc_host}:sub" = local.github_oidc_subject
         }
       }
     }]
@@ -172,7 +172,7 @@ resource "aws_iam_role_policy" "infrastructure" {
         Effect = "Allow"
         Action = [
           "ec2:*", "rds:*", "lambda:*", "events:*", "scheduler:*",
-          "logs:*", "apigateway:*", "kms:DescribeKey",
+          "logs:*", "apigateway:*", "sqs:*", "cloudwatch:*", "kms:DescribeKey",
           "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
           "secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy",
           "secretsmanager:ListSecretVersionIds", "secretsmanager:TagResource",
@@ -223,8 +223,8 @@ output "github_environment_variables" {
   description = "Set these variables in the repository's dev GitHub environment."
   value = {
     AWS_ROLE_ARN    = aws_iam_role.deploy.arn
-    AWS_REGION      = var.aws_region
-    PROJECT         = var.project
+    AWS_REGION      = local.settings.aws_region
+    PROJECT         = local.settings.project
     TF_STATE_BUCKET = aws_s3_bucket.state.id
     TF_STATE_KEY    = local.state_key
   }

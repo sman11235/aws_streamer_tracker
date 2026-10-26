@@ -1,11 +1,11 @@
 output "youtube_webhook_url" {
   description = "Public YouTube WebSub callback URL."
-  value       = "${aws_apigatewayv2_stage.api.invoke_url}youtube/webhook"
+  value       = "${aws_apigatewayv2_api.api.api_endpoint}${local.infrastructure.api.callback_paths.youtube}"
 }
 
 output "twitch_webhook_url" {
   description = "Public Twitch EventSub callback URL."
-  value       = "${aws_apigatewayv2_stage.api.invoke_url}twitch/webhook"
+  value       = "${aws_apigatewayv2_api.api.api_endpoint}${local.infrastructure.api.callback_paths.twitch}"
 }
 
 output "postgres_endpoint" {

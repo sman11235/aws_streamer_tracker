@@ -1,0 +1,13 @@
+# Public identity and trust settings, not credentials. Keep consistent with the
+# GitHub environment and repository OIDC subject configuration.
+variables:
+  aws_region: us-east-1
+  project: streamer-stats
+  github_repository: sman11235/aws_streamer_tracker
+  github_owner_id: "157008436"
+  github_repository_id: "1379103315"
+  existing_oidc_provider_arn: null
+environment: dev
+oidc:
+  issuer_url: https://token.actions.githubusercontent.com
+  audience: sts.amazonaws.com

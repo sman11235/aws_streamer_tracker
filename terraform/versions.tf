@@ -5,6 +5,6 @@ terraform {
   }
 }
 provider "aws" {
-  region = var.aws_region
-  default_tags { tags = { Project = var.project, Environment = var.environment, ManagedBy = "Terraform" } }
+  region = local.settings.aws_region
+  default_tags { tags = { Project = local.settings.project, Environment = local.settings.environment, ManagedBy = "Terraform" } }
 }

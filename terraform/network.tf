@@ -3,7 +3,7 @@ data "aws_availability_zones" "available" {
 }
 
 resource "aws_vpc" "app" {
-  cidr_block           = var.vpc_cidr
+  cidr_block           = local.settings.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
 }
@@ -13,19 +13,19 @@ resource "aws_internet_gateway" "app" {
 }
 
 resource "aws_subnet" "public" {
-  for_each = { for index, az in slice(data.aws_availability_zones.available.names, 0, 2) : index => az }
+  for_each = { for index, az in slice(data.aws_availability_zones.available.names, 0, local.infrastructure.network.availability_zone_count) : index => az }
 
   vpc_id                  = aws_vpc.app.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, each.key)
+  cidr_block              = cidrsubnet(local.settings.vpc_cidr, local.infrastructure.network.subnet_newbits, each.key)
   availability_zone       = each.value
   map_public_ip_on_launch = true
 }
 
 resource "aws_subnet" "private" {
-  for_each = { for index, az in slice(data.aws_availability_zones.available.names, 0, 2) : index => az }
+  for_each = { for index, az in slice(data.aws_availability_zones.available.names, 0, local.infrastructure.network.availability_zone_count) : index => az }
 
   vpc_id            = aws_vpc.app.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, each.key + 10)
+  cidr_block        = cidrsubnet(local.settings.vpc_cidr, local.infrastructure.network.subnet_newbits, each.key + local.infrastructure.network.private_subnet_offset)
   availability_zone = each.value
 }
 
@@ -33,7 +33,7 @@ resource "aws_route_table" "public" {
   vpc_id = aws_vpc.app.id
 
   route {
-    cidr_block = "0.0.0.0/0"
+    cidr_block = local.infrastructure.network.outbound_cidr
     gateway_id = aws_internet_gateway.app.id
   }
 }
@@ -60,7 +60,7 @@ resource "aws_route_table" "private" {
   vpc_id = aws_vpc.app.id
 
   route {
-    cidr_block     = "0.0.0.0/0"
+    cidr_block     = local.infrastructure.network.outbound_cidr
     nat_gateway_id = aws_nat_gateway.app.id
   }
 }
@@ -79,18 +79,18 @@ resource "aws_security_group" "lambda" {
 
   egress {
     description = "HTTPS access to AWS, YouTube, and Twitch APIs."
-    from_port   = 443
-    to_port     = 443
+    from_port   = local.infrastructure.network.https_port
+    to_port     = local.infrastructure.network.https_port
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [local.infrastructure.network.outbound_cidr]
   }
 
   egress {
     description = "PostgreSQL access within the application VPC."
-    from_port   = 5432
-    to_port     = 5432
+    from_port   = local.runtime_config.database.port
+    to_port     = local.runtime_config.database.port
     protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    cidr_blocks = [local.settings.vpc_cidr]
   }
 }
 
@@ -101,8 +101,8 @@ resource "aws_security_group" "postgres" {
 
   ingress {
     description     = "PostgreSQL from Lambda functions."
-    from_port       = 5432
-    to_port         = 5432
+    from_port       = local.runtime_config.database.port
+    to_port         = local.runtime_config.database.port
     protocol        = "tcp"
     security_groups = [aws_security_group.lambda.id]
   }

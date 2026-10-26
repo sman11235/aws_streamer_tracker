@@ -4,7 +4,7 @@ Tracks subscribers, CCV, and streams for YouTube and Twitch streamers.
 
 ## Lambda packages
 
-The Lambda source files are in `aws/lambda/`. Install the build dependency and build all functions listed in [`scripts/build-config.yaml`](scripts/build-config.yaml):
+The Lambda entrypoints and shared ingestion package are in `aws/lambda/`. Install the build dependency and build all functions listed in [`scripts/build-config.yaml`](scripts/build-config.yaml):
 
 ```sh
 python3 -m pip install -r requirements-build.txt
@@ -18,11 +18,21 @@ functions:
   get-stream-stats: ../aws/lambda/get_stream_stats.py
 ```
 
-Add an entry to build another function. Source paths are relative to the config file. Use `--config /path/to/build-config.yaml` to select another config. Terraform's function definitions are managed separately.
+Add an entry to build another function. Source paths are relative to the config file. Use `--config /path/to/build-config.yaml` to select another config. Terraform reads function names from the same config; permissions, routes, and schedules still need definitions for new functions.
 
 The script writes to `terraform/artifacts/`, matching Terraform's default `lambda_artifact_directory`. The default config and output paths are relative to the repo, so it also works from other working directories. Use `--output-dir /path/to/artifacts` for a custom destination and set Terraform's `lambda_artifact_directory` to the same directory.
 
-Each ZIP contains its corresponding Python module at the archive root. The source files are currently empty placeholders; add a `handler` function before invoking the Lambdas. The script packages only these modules; dependency packaging must be added when dependencies are introduced. Rerun the script after changing the source files and before deploying with Terraform.
+Each ZIP contains its handler at the archive root, the shared `tracker` package, runtime YAML, pinned runtime dependencies for Python 3.12/ARM64, and the RDS CA bundle. The builder uses pip or uv and requires internet access. Rerun it after changing sources or runtime YAML and before deploying with Terraform.
+
+## Configuration
+
+Platform URLs and runtime behavior are explicit in [`config/runtime.yaml`](config/runtime.yaml). Resource settings and schedules are in [`config/infrastructure.yaml`](config/infrastructure.yaml); GitHub OIDC/bootstrap settings are in [`config/bootstrap.yaml`](config/bootstrap.yaml). Existing Terraform and GitHub variable overrides remain supported. See the [configuration guide](docs/configuration.md) for precedence, deployment behavior, and secret handling.
+
+## Subscriptions and ingestion
+
+YouTube WebSub and Twitch EventSub registration, signed callbacks, EventBridge processing, and CCV polling are implemented. Follow the [subscription deployment guide](docs/subscriptions.md) to apply the additive database migration, create platform credentials, test callbacks, and enable schedules with `TRACKING_JOBS_ENABLED=true`. Schedules remain disabled by default until those prerequisites are ready.
+
+The [channel updater](docs/channel-updates.md) discovers channel IDs from `streamer_info`, then refreshes tracked channel names, profile pictures, descriptions, and available statistics hourly, saving current values and history snapshots together. Newly added streamers/platform channels are picked up automatically. Its schedule and API settings are in YAML. Apply migration 002 before deploying it.
 
 ## CI/CD
 
@@ -32,8 +42,8 @@ Follow the [AWS deployment setup](docs/aws-deployment.md) to bootstrap the state
 
 ## Database
 
-Terraform provisions a private Amazon RDS PostgreSQL instance. Its master password is generated and stored by RDS in Secrets Manager. The database schema is in [`terraform/schema.sql`](terraform/schema.sql); apply it after RDS is available with a PostgreSQL client that can reach the private database (for example, through a VPN, bastion host, or an approved migration job).
+Terraform provisions a private Amazon RDS PostgreSQL instance. Its master password is generated and stored by RDS in Secrets Manager. Apply [`db/schema.sql`](db/schema.sql), followed by all numbered files in [`db/migrations`](db/migrations), with a PostgreSQL client that can reach the private database (for example, through a VPN, bastion host, or an approved migration job). For an existing database, apply only outstanding migrations in order.
 
-Lambda functions receive `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_SECRET_ARN`, and `DATABASE_SSLMODE`. Their deployment ZIPs must include a PostgreSQL driver and use these settings instead of the removed DynamoDB table environment variables.
+Lambda functions receive database resource references through the environment bindings in runtime YAML. The shared runtime retrieves credentials from Secrets Manager and uses the configured TLS mode, defaulting to certificate and hostname verification.
 
 The dedicated VPC includes a NAT gateway so VPC-attached Lambda functions can call AWS, YouTube, and Twitch APIs. The NAT gateway incurs AWS charges.
