@@ -1,0 +1,85 @@
+# Non-secret Lambda settings. Packaged as tracker/config.yaml in every ZIP.
+# AWS-generated resource addresses and secret references arrive through the
+# environment bindings below; secret values remain in SSM / Secrets Manager.
+logging:
+  level: INFO
+http:
+  user_agent: streamer-tracker/1.0
+  timeout_seconds: 5
+  max_response_bytes: 1048576
+  default_retry_after_seconds: 60
+  min_retry_after_seconds: 1
+  max_retry_after_seconds: 3600
+aws:
+  connect_timeout_seconds: 2
+  read_timeout_seconds: 5
+  max_retry_attempts: 2
+  cache_ttl_seconds: 60
+  eventbridge_batch_size: 10
+database:
+  port: 5432
+  connect_timeout_seconds: 5
+  ssl_mode: verify-full
+  ca_bundle_filename: rds-ca.pem
+jobs:
+  remaining_time_reserve_seconds: 25
+  local_time_budget_seconds: 90
+channel_updates:
+  youtube_batch_size: 50
+  twitch_batch_size: 100
+subscriptions:
+  batch_size: 100
+  pending_retry_seconds: 600
+  verification_timeout_seconds: 900
+  retry_base_seconds: 30
+  retry_max_seconds: 3600
+  retry_exponent_cap: 7
+youtube:
+  hub_url: https://pubsubhubbub.appspot.com/
+  feed_url: https://www.youtube.com/xml/feeds/videos.xml
+  videos_url: https://www.googleapis.com/youtube/v3/videos
+  channels_url: https://www.googleapis.com/youtube/v3/channels
+  channel_parts: [snippet, statistics]
+  video_parts: [snippet, liveStreamingDetails]
+  requested_lease_seconds: 432000
+  renewal_fraction: 0.8
+  max_accepted_lease_seconds: 31536000
+  polling_batch_size: 50
+  thumbnail_priority: [maxres, high, medium, default]
+twitch:
+  helix_url: https://api.twitch.tv/helix/
+  token_url: https://id.twitch.tv/oauth2/token
+  token_validation_url: https://id.twitch.tv/oauth2/validate
+  subscriptions_path: eventsub/subscriptions
+  streams_path: streams
+  users_path: users
+  token_validation_interval_seconds: 3600
+  token_expiry_margin_seconds: 60
+  authorization_attempts: 2
+  subscription_page_size: 100
+  polling_batch_size: 100
+  message_max_age_seconds: 600
+  message_future_tolerance_seconds: 60
+  revocation_retry_seconds: 300
+  terminal_subscription_statuses: [authorization_revoked, user_removed, version_removed]
+  thumbnail_width: 640
+  thumbnail_height: 360
+webhooks:
+  max_body_bytes: 524288
+events:
+  source_prefix: streamer.
+  detail_type: StreamLifecycleEvent
+environment:
+  event_bus_name: EVENT_BUS_NAME
+  database_host: DATABASE_HOST
+  database_port: DATABASE_PORT
+  database_name: DATABASE_NAME
+  database_secret_arn: DATABASE_SECRET_ARN
+  database_ca_bundle: DATABASE_CA_BUNDLE
+  youtube_secret: YOUTUBE_SECRET_PARAMETER
+  twitch_secret: TWITCH_SECRET_PARAMETER
+  twitch_client_id: TWITCH_CLIENT_ID_PARAMETER
+  twitch_client_secret: TWITCH_CLIENT_SECRET_PARAMETER
+  youtube_api_key: YOUTUBE_API_KEY_PARAMETER
+  youtube_callback: YOUTUBE_CALLBACK_URL
+  twitch_callback: TWITCH_CALLBACK_URL
