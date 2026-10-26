@@ -13,33 +13,33 @@ resource "aws_apigatewayv2_stage" "api" {
 }
 resource "aws_cloudwatch_log_group" "api" {
   name              = "/aws/apigateway/${local.prefix}-webhooks"
-  retention_in_days = 14
+  retention_in_days = local.infrastructure.api.log_retention_days
 }
 resource "aws_apigatewayv2_integration" "youtube" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
   integration_uri        = aws_lambda_function.fn["handle-youtube-notifs"].invoke_arn
-  payload_format_version = "2.0"
+  payload_format_version = local.infrastructure.api.payload_format_version
 }
 resource "aws_apigatewayv2_integration" "twitch" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
   integration_uri        = aws_lambda_function.fn["handle-twitch-notifs"].invoke_arn
-  payload_format_version = "2.0"
+  payload_format_version = local.infrastructure.api.payload_format_version
 }
 resource "aws_apigatewayv2_route" "youtube_get" {
   api_id    = aws_apigatewayv2_api.api.id
-  route_key = "GET /youtube/webhook"
+  route_key = "GET ${local.infrastructure.api.callback_paths.youtube}"
   target    = "integrations/${aws_apigatewayv2_integration.youtube.id}"
 }
 resource "aws_apigatewayv2_route" "youtube_post" {
   api_id    = aws_apigatewayv2_api.api.id
-  route_key = "POST /youtube/webhook"
+  route_key = "POST ${local.infrastructure.api.callback_paths.youtube}"
   target    = "integrations/${aws_apigatewayv2_integration.youtube.id}"
 }
 resource "aws_apigatewayv2_route" "twitch_post" {
   api_id    = aws_apigatewayv2_api.api.id
-  route_key = "POST /twitch/webhook"
+  route_key = "POST ${local.infrastructure.api.callback_paths.twitch}"
   target    = "integrations/${aws_apigatewayv2_integration.twitch.id}"
 }
 resource "aws_lambda_permission" "api" {

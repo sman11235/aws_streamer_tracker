@@ -2,7 +2,7 @@
 
 The [workflow](../.github/workflows/deploy.yml) builds every Lambda in `scripts/build-config.yaml`, checks Terraform formatting, and validates both Terraform roots on pull requests and pushes to `main`. These checks do not need AWS credentials. After checks pass on `main`, the deployment job plans and applies the application Terraform in the GitHub `dev` environment. You can also run the workflow manually from `main`.
 
-The deployment manages the entire application stack, including RDS, networking, IAM, API Gateway, schedules, and Lambda code. Lambda source files are still empty placeholders, so deployed functions will not handle invocations until their handlers are implemented. Database schema application remains a separate step requiring access to the private RDS instance.
+The deployment manages the entire application stack, including RDS, networking, IAM, API Gateway, schedules, and Lambda code. The ingestion functions implement WebSub/EventSub subscriptions, signed callbacks, stream reconciliation, and CCV polling. Database migration and platform-credential setup remain separate steps requiring access to the private RDS instance and SSM. Follow the [subscription deployment guide](subscriptions.md) before enabling schedules.
 
 ## One-time AWS setup
 
@@ -43,6 +43,8 @@ Set these environment **variables** using the bootstrap output:
 | `TF_STATE_BUCKET` | Bootstrap S3 bucket name |
 | `TF_STATE_KEY` | Application state key, normally `streamer-stats/dev/terraform.tfstate` |
 | `POSTGRES_BACKUP_RETENTION_DAYS` | Optional automated backup retention; defaults to `1` day |
+| `TRACKING_JOBS_ENABLED` | Set to `true` after the migration, SSM setup, and callback tests; defaults to `false` |
+| `ALARM_TOPIC_ARN` | Optional existing SNS topic for ingestion alerts |
 
 No AWS access keys need to be stored in GitHub. Only the deployment job can request an OIDC token; pull request checks do not assume the AWS role. Deployment jobs run one at a time and use [S3 state locking](https://developer.hashicorp.com/terraform/language/backend/s3). Each job applies the plan it just generated.
 

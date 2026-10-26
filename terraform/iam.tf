@@ -2,16 +2,17 @@ data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 locals {
-  prefix = "${var.project}-${var.environment}"
-  functions = toset([
-    "subscribe-to-websub", "subscribe-to-eventsub", "handle-youtube-notifs",
-    "handle-twitch-notifs", "handle-stream-events", "get-stream-stats"
-  ])
-  secret_parameters = [
-    var.youtube_websub_secret_parameter, var.twitch_secret_parameter,
-    var.twitch_client_id_parameter, var.twitch_client_secret_parameter
-  ]
-  secret_arns = [for p in local.secret_parameters : "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${trimprefix(p, "/")}"]
+  prefix    = "${local.settings.project}-${local.settings.environment}"
+  functions = toset(keys(local.build_config.functions))
+  function_parameters = {
+    subscribe-to-websub   = [local.settings.youtube_websub_secret_parameter]
+    subscribe-to-eventsub = [local.settings.twitch_secret_parameter, local.settings.twitch_client_id_parameter, local.settings.twitch_client_secret_parameter]
+    handle-youtube-notifs = [local.settings.youtube_websub_secret_parameter]
+    handle-twitch-notifs  = [local.settings.twitch_secret_parameter]
+    handle-stream-events  = [local.settings.youtube_api_key_parameter, local.settings.twitch_client_id_parameter, local.settings.twitch_client_secret_parameter]
+    get-stream-stats      = [local.settings.youtube_api_key_parameter, local.settings.twitch_client_id_parameter, local.settings.twitch_client_secret_parameter]
+    update-channels       = [local.settings.youtube_api_key_parameter, local.settings.twitch_client_id_parameter, local.settings.twitch_client_secret_parameter]
+  }
 }
 
 data "aws_iam_policy_document" "lambda_assume" {
@@ -45,7 +46,7 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc" {
 data "aws_iam_policy_document" "function_permissions" {
   for_each = local.functions
   dynamic "statement" {
-    for_each = contains(["handle-youtube-notifs", "handle-twitch-notifs"], each.key) ? [1] : []
+    for_each = contains(local.infrastructure.lambda.event_publishers, each.key) ? [1] : []
     content {
       actions   = ["events:PutEvents"]
       resources = [aws_cloudwatch_event_bus.stream_events.arn]
@@ -55,12 +56,13 @@ data "aws_iam_policy_document" "function_permissions" {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [aws_db_instance.postgres.master_user_secret[0].secret_arn]
   }
-  dynamic "statement" {
-    for_each = contains(["subscribe-to-eventsub", "handle-twitch-notifs", "get-stream-stats", "handle-youtube-notifs", "subscribe-to-websub"], each.key) ? [1] : []
-    content {
-      actions   = ["ssm:GetParameter"]
-      resources = local.secret_arns
-    }
+  statement {
+    actions   = ["ssm:GetParameter"]
+    resources = [for p in local.function_parameters[each.key] : "arn:${data.aws_partition.current.partition}:ssm:${local.settings.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${trimprefix(p, "/")}"]
+  }
+  statement {
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.ingestion_failures.arn]
   }
 }
 
@@ -90,9 +92,7 @@ resource "aws_iam_role_policy" "scheduler" {
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{ Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = [
-      aws_lambda_function.fn["subscribe-to-websub"].arn,
-      aws_lambda_function.fn["subscribe-to-eventsub"].arn,
-      aws_lambda_function.fn["get-stream-stats"].arn
-    ] }]
+      for job in values(local.schedules) : aws_lambda_function.fn[job.lambda].arn
+    ] }, { Effect = "Allow", Action = ["sqs:SendMessage"], Resource = aws_sqs_queue.ingestion_failures.arn }]
   })
 }

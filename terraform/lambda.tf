@@ -1,37 +1,39 @@
 resource "aws_cloudwatch_log_group" "fn" {
   for_each          = local.functions
   name              = "/aws/lambda/${local.prefix}-${each.key}"
-  retention_in_days = 14
+  retention_in_days = local.infrastructure.lambda.log_retention_days
 }
 
 resource "aws_lambda_function" "fn" {
   for_each         = local.functions
   function_name    = "${local.prefix}-${each.key}"
   role             = aws_iam_role.lambda[each.key].arn
-  runtime          = "python3.12"
+  runtime          = local.infrastructure.lambda.runtime
   handler          = "${replace(each.key, "-", "_")}.handler"
-  filename         = "${var.lambda_artifact_directory}/${each.key}.zip"
-  source_code_hash = filebase64sha256("${var.lambda_artifact_directory}/${each.key}.zip")
-  architectures    = ["arm64"]
-  timeout          = 120
-  memory_size      = each.key == "get-stream-stats" ? 512 : 256
+  filename         = "${local.settings.lambda_artifact_directory}/${each.key}.zip"
+  source_code_hash = filebase64sha256("${local.settings.lambda_artifact_directory}/${each.key}.zip")
+  architectures    = local.infrastructure.lambda.architectures
+  timeout          = local.infrastructure.lambda.timeout_seconds
+  memory_size      = lookup(local.infrastructure.lambda.memory_overrides_mb, each.key, local.infrastructure.lambda.memory_mb)
   environment {
     variables = {
-      EVENT_BUS_NAME                 = aws_cloudwatch_event_bus.stream_events.name
-      DATABASE_HOST                  = aws_db_instance.postgres.address
-      DATABASE_PORT                  = tostring(aws_db_instance.postgres.port)
-      DATABASE_NAME                  = aws_db_instance.postgres.db_name
-      DATABASE_SECRET_ARN            = aws_db_instance.postgres.master_user_secret[0].secret_arn
-      DATABASE_SSLMODE               = "require"
-      YOUTUBE_SECRET_PARAMETER       = var.youtube_websub_secret_parameter
-      TWITCH_SECRET_PARAMETER        = var.twitch_secret_parameter
-      TWITCH_CLIENT_ID_PARAMETER     = var.twitch_client_id_parameter
-      TWITCH_CLIENT_SECRET_PARAMETER = var.twitch_client_secret_parameter
+      (local.runtime_config.environment.event_bus_name)       = aws_cloudwatch_event_bus.stream_events.name
+      (local.runtime_config.environment.database_host)        = aws_db_instance.postgres.address
+      (local.runtime_config.environment.database_port)        = tostring(aws_db_instance.postgres.port)
+      (local.runtime_config.environment.database_name)        = aws_db_instance.postgres.db_name
+      (local.runtime_config.environment.database_secret_arn)  = aws_db_instance.postgres.master_user_secret[0].secret_arn
+      (local.runtime_config.environment.youtube_secret)       = local.settings.youtube_websub_secret_parameter
+      (local.runtime_config.environment.twitch_secret)        = local.settings.twitch_secret_parameter
+      (local.runtime_config.environment.twitch_client_id)     = local.settings.twitch_client_id_parameter
+      (local.runtime_config.environment.twitch_client_secret) = local.settings.twitch_client_secret_parameter
+      (local.runtime_config.environment.youtube_api_key)      = local.settings.youtube_api_key_parameter
+      (local.runtime_config.environment.youtube_callback)     = "${aws_apigatewayv2_api.api.api_endpoint}${local.infrastructure.api.callback_paths.youtube}"
+      (local.runtime_config.environment.twitch_callback)      = "${aws_apigatewayv2_api.api.api_endpoint}${local.infrastructure.api.callback_paths.twitch}"
     }
   }
   vpc_config {
     security_group_ids = [aws_security_group.lambda.id]
     subnet_ids         = values(aws_subnet.private)[*].id
   }
-  depends_on = [aws_iam_role_policy_attachment.lambda_logs, aws_iam_role_policy_attachment.lambda_vpc, aws_cloudwatch_log_group.fn, aws_route_table_association.private]
+  depends_on = [aws_iam_role_policy_attachment.lambda_logs, aws_iam_role_policy_attachment.lambda_vpc, aws_iam_role_policy.function, aws_cloudwatch_log_group.fn, aws_route_table_association.private]
 }
