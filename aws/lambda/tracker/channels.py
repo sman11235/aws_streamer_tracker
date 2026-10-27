@@ -67,19 +67,21 @@ def youtube_channel(item):
 
 
 def twitch_channel(item):
-    """Normalize a public Twitch profile without inventing unsupported statistics.
+    """Normalize a Twitch profile, storing its follower count as subscriber_count.
 
-    Return its display name, description, and image. Keep paid subscriber/video
-    totals and deprecated channel views as None; followers are not subscribers.
-    Raise ValueError for a missing display name.
+    Use the supplied follower_count for the shared audience-count field. Preserve
+    missing followers as None and reported zero as zero. Keep video totals and
+    deprecated channel views as None. Raise ValueError for a missing display name
+    or an invalid follower count.
 
     Args:
         item (dict[str, Any]): Twitch Get Users resource containing display_name and
-            optional profile fields.
+            optional profile fields, optionally enriched with follower_count as a
+            nonnegative integer or digit string. Get Users does not supply it.
 
     Returns:
-        dict[str, str | int | None]: Normalized public profile with unsupported count
-            fields set to None.
+        dict[str, str | int | None]: Normalized public profile with subscriber_count
+            representing followers, and unavailable count fields set to None.
     """
     name = item["display_name"]
     if not isinstance(name, str) or not name.strip():
@@ -87,9 +89,9 @@ def twitch_channel(item):
     return {
         "channel_name": name, "description": item.get("description"),
         "profile_picture_url": item.get("profile_image_url") or None,
-        # App credentials cannot retrieve paid subscription totals. Get Users'
-        # deprecated view_count is invalid; followers are not subscribers.
-        "subscriber_count": None, "video_count": None, "total_views": None,
+        # The shared audience-count field stores followers for Twitch.
+        "subscriber_count": optional_count(item.get("follower_count")),
+        "video_count": None, "total_views": None,
     }
 
 
