@@ -11,11 +11,11 @@ Discovery is idempotent by platform/channel ID. Existing rows keep their owner, 
 | `channel_name` | Channel title | Display name |
 | `profile_picture_url` | Preferred available thumbnail | Profile image |
 | `description` | Channel description | Channel description |
-| `subscriber_count` | Public API count; rounded, or null when hidden/unavailable | Null; paid totals require broadcaster authorization |
+| `subscriber_count` | Public API count; rounded, or null when hidden/unavailable | Supplied follower count; null when unavailable |
 | `total_views` | Reported channel view count | Null; deprecated Get Users `view_count` is invalid |
 | `video_count` | Reported public video count | Null; Get Users does not supply a video total |
 
-The updater uses [YouTube Channels: list](https://developers.google.com/youtube/v3/docs/channels/list) with `snippet,statistics` and [Twitch Get Users](https://dev.twitch.tv/docs/api/reference/#get-users). YouTube counts retain the API's precision; missing/hidden counts remain null, while a reported zero is saved as zero. Twitch followers are never relabeled as paid subscribers. Collecting Twitch paid subscriber totals needs a separate broadcaster OAuth flow with `channel:read:subscriptions`, as described in [Get Broadcaster Subscriptions](https://dev.twitch.tv/docs/api/reference/#get-broadcaster-subscriptions).
+The updater uses [YouTube Channels: list](https://developers.google.com/youtube/v3/docs/channels/list) with `snippet,statistics` and [Twitch Get Users](https://dev.twitch.tv/docs/api/reference/#get-users). YouTube counts retain the API's precision; missing/hidden counts remain null, while a reported zero is saved as zero. For Twitch, the shared `subscriber_count` field represents followers. `twitch_channel` reads an optional `follower_count` supplied alongside the user profile, validates it, and passes it to the current channel and history snapshot. Get Users does not return follower counts, and the current adapter does not enrich the response, so scheduled refreshes still store null unless a follower count is supplied upstream. The [Get Channel Followers](https://dev.twitch.tv/docs/api/reference/#get-channel-followers) endpoint is the separate source for that total.
 
 ## Deployment
 
