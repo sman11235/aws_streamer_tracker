@@ -55,8 +55,8 @@ class ChannelNormalizationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 optional_count(value)
 
-    def test_twitch_does_not_relabel_followers_or_use_deprecated_views(self):
-        """Verify unsupported Twitch statistics remain unknown despite misleading response fields.
+    def test_twitch_stores_followers_as_subscribers_without_deprecated_views(self):
+        """Store the supplied follower count while ignoring paid totals and deprecated views.
 
         Args:
             self (ChannelNormalizationTests): Test-case instance containing fixtures,
@@ -69,7 +69,26 @@ class ChannelNormalizationTests(unittest.TestCase):
         metadata = twitch_channel(twitch_user_item(view_count=9999, follower_count=123, subscriber_count=456))
         self.assertEqual(metadata["channel_name"], "Updated Twitch")
         self.assertEqual(metadata["profile_picture_url"], "https://images.example/twitch.png")
-        self.assertTrue(all(metadata[key] is None for key in ("subscriber_count", "total_views", "video_count")))
+        self.assertEqual(metadata["subscriber_count"], 123)
+        self.assertTrue(all(metadata[key] is None for key in ("total_views", "video_count")))
+
+    def test_twitch_follower_counts_preserve_missing_and_zero(self):
+        """Normalize supplied counts while preserving unknown followers and genuine zero.
+
+        Args:
+            self (ChannelNormalizationTests): Test-case instance providing assertions.
+
+        Returns:
+            None: Assertions complete without returning a value.
+        """
+        for value, expected in ((None, None), (0, 0), ("0", 0), ("123", 123)):
+            with self.subTest(follower_count=value):
+                metadata = twitch_channel(twitch_user_item(follower_count=value))
+                self.assertEqual(metadata["subscriber_count"], expected)
+        self.assertIsNone(twitch_channel(twitch_user_item())["subscriber_count"])
+        for value in (-1, True, 1.5, "unknown"):
+            with self.subTest(follower_count=value), self.assertRaises(ValueError):
+                twitch_channel(twitch_user_item(follower_count=value))
 
 
 class ChannelUpdateTests(unittest.TestCase):
@@ -93,7 +112,7 @@ class ChannelUpdateTests(unittest.TestCase):
         self.store.save_channel_snapshot.return_value = "updated"
         self.platforms = MagicMock()
         self.platforms.youtube_channels.return_value = {"UC-channel": youtube_channel_item()}
-        self.platforms.twitch_users.return_value = {"1234": twitch_user_item()}
+        self.platforms.twitch_users.return_value = {"1234": twitch_user_item(follower_count=123)}
 
     def invoke(self, event=None, context=None):
         """Run the channel updater with test adapters and an optional event or Lambda context.
@@ -129,6 +148,8 @@ class ChannelUpdateTests(unittest.TestCase):
         self.platforms.twitch_users.assert_called_once_with(["1234"])
         keys = [call.args[3] for call in self.store.save_channel_snapshot.call_args_list]
         self.assertEqual(keys, ["scheduled:2026-10-26T12:00:00+00:00"] * 2)
+        twitch_metadata = self.store.save_channel_snapshot.call_args_list[1].args[1]
+        self.assertEqual(twitch_metadata["subscriber_count"], 123)
 
     def test_discovers_streamer_channels_before_selecting_refresh_candidates(self):
         """Verify streamer-linked channels are discovered before refresh candidate selection.
