@@ -684,6 +684,78 @@ class DatabaseWorkflowTests(unittest.TestCase):
             self.assertEqual(eventsub({}, None, store_factory=self.open_store, aws=self.aws, platforms=platforms)["enabled"], 2)
         self.assertEqual(platforms.twitch.call_count, 2)
 
+    def test_twitch_poller_timestamps_live_replaced_and_offline_broadcasts(self):
+        """Record successful Twitch polling times on each broadcast observed by the poll.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert new/live broadcasts advance last_polled_at, replaced/offline
+            broadcasts receive their final polling time, and older history stays intact.
+        """
+        self.channel("TWITCH")
+        platforms = MagicMock()
+        start = utcnow()
+        item = {"id": "first", "title": "Live", "started_at": start.isoformat(), "viewer_count": 0}
+        platforms.twitch_streams.return_value = {"1234": item}
+        with patch("tracker.streams.utcnow", return_value=start):
+            self.assertEqual(poll({}, None, store_factory=self.open_store, platforms=platforms)["sampled_channels"], 1)
+        first = self.store.query("SELECT id, last_polled_at FROM videos")[0]
+        self.assertEqual(first["last_polled_at"], start)
+
+        again = start + timedelta(minutes=2)
+        with patch("tracker.streams.utcnow", return_value=again):
+            poll({}, None, store_factory=self.open_store, platforms=platforms)
+        self.assertEqual(self.store.query("SELECT id, last_polled_at FROM videos"),
+                         [{"id": first["id"], "last_polled_at": again}])
+
+        replacement = start + timedelta(minutes=4)
+        item["id"] = "second"
+        with patch("tracker.streams.utcnow", return_value=replacement):
+            poll({}, None, store_factory=self.open_store, platforms=platforms)
+        rows = {row["platform_video_id"]: row for row in self.store.query("SELECT * FROM videos")}
+        self.assertEqual((rows["first"]["stream_status"], rows["first"]["last_polled_at"]), ("ENDED", replacement))
+        self.assertEqual((rows["second"]["stream_status"], rows["second"]["last_polled_at"]), ("LIVE", replacement))
+
+        offline = start + timedelta(minutes=6)
+        platforms.twitch_streams.return_value = {}
+        with patch("tracker.streams.utcnow", return_value=offline):
+            poll({}, None, store_factory=self.open_store, platforms=platforms)
+        with patch("tracker.streams.utcnow", return_value=offline + timedelta(minutes=2)):
+            poll({}, None, store_factory=self.open_store, platforms=platforms)
+        rows = {row["platform_video_id"]: row for row in self.store.query("SELECT * FROM videos")}
+        self.assertEqual(rows["first"]["last_polled_at"], replacement)
+        self.assertEqual((rows["second"]["stream_status"], rows["second"]["last_polled_at"]), ("ENDED", offline))
+
+    def test_twitch_events_preserve_poll_times_and_stale_polls_are_ignored(self):
+        """Separate webhook observation times from polling and protect newer stream state.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert webhook-created videos have no polling time, subsequent events
+            preserve actual poll times, and stale polls cannot rewrite them or add samples.
+        """
+        channel = self.channel("TWITCH")
+        start = utcnow()
+        video = {"id": "first", "title": "Live", "status": "LIVE", "viewers": 12}
+        apply_snapshot(self.store, channel, start, video, provider="twitch")
+        self.assertIsNone(self.store.query("SELECT last_polled_at FROM videos")[0]["last_polled_at"])
+        polled = start + timedelta(minutes=2)
+        apply_snapshot(self.store, channel, polled, video, provider="twitch", sample=True)
+        apply_snapshot(self.store, channel, start + timedelta(minutes=3), video, provider="twitch")
+        self.assertEqual(self.store.query("SELECT last_polled_at FROM videos")[0]["last_polled_at"], polled)
+        self.assertEqual(apply_snapshot(self.store, channel, start + timedelta(minutes=1), video,
+                                        provider="twitch", sample=True), "stale")
+        self.assertEqual(self.store.query("SELECT last_polled_at FROM videos")[0]["last_polled_at"], polled)
+        self.assertEqual(self.store.query("SELECT count(*) AS n FROM ccv")[0]["n"], 1)
+
+        apply_snapshot(self.store, channel, start + timedelta(minutes=4), None, provider="twitch")
+        row = self.store.query("SELECT stream_status, last_polled_at FROM videos")[0]
+        self.assertEqual(row, {"stream_status": "ENDED", "last_polled_at": polled})
+
     def test_poller_preserves_missing_youtube_viewer_counts(self):
         """Verify a live transition without YouTube viewer data creates no fabricated CCV sample.
 

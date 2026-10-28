@@ -74,6 +74,12 @@ For Twitch terminal failures (`authorization_revoked`, `user_removed`, `version_
 
 Keep signing secrets stable. Subscription rows record SSM versions, and callbacks can verify the active and pending versions during renewal. Changing the latest SSM version causes renewal/recreation on the next reconciliation. This is not a zero-interruption rotation mechanism; retain previous SSM versions while migration is in progress.
 
+## Polling timestamps
+
+Successful Twitch polls save their observation start time in `videos.last_polled_at` in the same transaction as stream metadata and CCV samples. A newly discovered live broadcast receives the timestamp on insertion; subsequent polls advance it. A poll that finds a replacement broadcast or an offline channel also timestamps the previously live broadcasts it marks ended. Older already-ended history is not retimestamped on later offline polls. Stale or untracked observations do not update polling timestamps.
+
+EventSub observations preserve existing polling timestamps and leave the field null on videos created only by a webhook. YouTube continues recording polling attempts for its known live/scheduled video IDs, including IDs omitted from an otherwise successful API response. This change uses the existing column from migration 001 and requires no additional migration.
+
 ## YouTube members-only classification
 
 Video requests include `statistics` alongside `snippet` and `liveStreamingDetails` in `config/runtime.yaml`. Configuration validation requires all three parts. The application uses the requested rule: a returned video's `statistics.viewCount` key means `is_members_only = false`; an absent key, including an absent `statistics` object, means `is_members_only = true`. A value of `"0"` or `0` counts as present. CCV and title wording do not affect this classification.
