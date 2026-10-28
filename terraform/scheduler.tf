@@ -11,7 +11,13 @@ resource "aws_scheduler_schedule" "jobs" {
   target {
     arn      = aws_lambda_function.fn[each.value.lambda].arn
     role_arn = aws_iam_role.scheduler.arn
-    input    = jsonencode({ job = each.key, scheduled_at = "<aws.scheduler.scheduled-time>" })
+    # Scheduler substitutes literal context tokens before the target decodes JSON.
+    # jsonencode escapes angle brackets, so restore this token in the raw input.
+    input = replace(
+      jsonencode({ job = each.key, scheduled_at = "<aws.scheduler.scheduled-time>" }),
+      "\\u003caws.scheduler.scheduled-time\\u003e",
+      "<aws.scheduler.scheduled-time>"
+    )
     dead_letter_config {
       arn = aws_sqs_queue.ingestion_failures.arn
     }
