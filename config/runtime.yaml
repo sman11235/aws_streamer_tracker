@@ -40,7 +40,7 @@ youtube:
   videos_url: https://www.googleapis.com/youtube/v3/videos
   channels_url: https://www.googleapis.com/youtube/v3/channels
   channel_parts: [snippet, statistics]
-  video_parts: [snippet, liveStreamingDetails]
+  video_parts: [snippet, liveStreamingDetails, statistics]
   requested_lease_seconds: 432000
   renewal_fraction: 0.8
   max_refresh_interval_seconds: 432000  # Mandatory renewal deadline: five days.

@@ -500,6 +500,66 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(self.store.query("SELECT title, stream_status FROM videos")[0], {"title": "New", "stream_status": "ENDED"})
 
+    def test_youtube_membership_is_saved_by_event_worker_and_refreshed_by_poller(self):
+        """Persist the viewCount membership rule through event handling and later polling.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert absent viewCount marks membership and a later present zero
+            clears it on the same video without creating duplicate rows.
+        """
+        channel = self.channel("YOUTUBE")
+        platforms = MagicMock()
+        item = {
+            "id": "membership-video",
+            "snippet": {"channelId": "UC-channel", "title": "Live", "liveBroadcastContent": "live"},
+            "liveStreamingDetails": {"actualStartTime": utcnow().isoformat()},
+            "statistics": {"likeCount": "5"},
+        }
+        platforms.youtube_videos.return_value = {item["id"]: item}
+        event = {
+            "source": "streamer.youtube", "detail-type": "StreamLifecycleEvent",
+            "detail": {"provider": "youtube", "kind": "video.changed", "event_key": "membership-notification",
+                       "channel_id": str(channel["id"]), "video_id": item["id"]},
+        }
+        self.assertEqual(handle(event, None, store_factory=self.open_store, platforms=platforms)["status"], "applied")
+        saved = self.store.query("SELECT id, is_members_only FROM videos")[0]
+        self.assertIs(saved["is_members_only"], True)
+
+        item["statistics"]["viewCount"] = "0"
+        self.assertEqual(poll({}, None, store_factory=self.open_store, platforms=platforms)["sampled_channels"], 1)
+        self.assertEqual(self.store.query("SELECT id, is_members_only FROM videos"),
+                         [{"id": saved["id"], "is_members_only": False}])
+
+        del item["statistics"]["viewCount"]
+        poll({}, None, store_factory=self.open_store, platforms=platforms)
+        self.assertIs(self.store.query("SELECT is_members_only FROM videos")[0]["is_members_only"], True)
+
+    def test_membership_update_preserves_unknown_values_and_rejects_stale_snapshots(self):
+        """Protect stored membership flags when metadata is absent or older than saved state.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert new unclassified rows default false, omitted flags preserve
+            state, and stale classification updates are ignored.
+        """
+        channel = self.channel("YOUTUBE")
+        now = utcnow()
+        video = {"id": "membership", "title": "Live", "status": "LIVE"}
+        video_id = self.store.upsert_video(channel["id"], video, now)
+        self.assertIs(self.store.query("SELECT is_members_only FROM videos WHERE id = %s", (video_id,))[0]["is_members_only"], False)
+        self.store.upsert_video(channel["id"], {**video, "is_members_only": True}, now + timedelta(seconds=1))
+        self.store.upsert_video(channel["id"], video, now + timedelta(seconds=2))
+        self.store.upsert_video(channel["id"], {**video, "is_members_only": None}, now + timedelta(seconds=3))
+        self.assertIs(self.store.query("SELECT is_members_only FROM videos WHERE id = %s", (video_id,))[0]["is_members_only"], True)
+        stale = self.store.upsert_video(channel["id"], {**video, "is_members_only": False}, now)
+        self.assertIsNone(stale)
+        self.assertIs(self.store.query("SELECT is_members_only FROM videos WHERE id = %s", (video_id,))[0]["is_members_only"], True)
+
     def test_late_offline_event_reconciles_current_broadcast_and_duplicates_skip_api(self):
         """Verify delayed offline events preserve a newer broadcast and duplicate events skip API calls.
 

@@ -13,16 +13,20 @@ def youtube_video(item):
     """Normalize YouTube metadata into a live-stream snapshot, or None for uploads.
 
     Give actual end times precedence over stale live flags. Preserve unknown
-    viewer counts as None. Raise RuntimeError when lifecycle metadata is
-    inconsistent so later polling can retry without inventing a cancelled state.
+    viewer counts as None. Absence of statistics.viewCount marks a stream as
+    members-only; zero counts as present.
+    This is an application heuristic, not a documented YouTube access guarantee.
+    Raise RuntimeError when lifecycle metadata is inconsistent so later polling
+    can retry without inventing a cancelled state.
 
     Args:
         item (dict[str, Any]): YouTube video resource containing snippet and optional
-            liveStreamingDetails.
+            liveStreamingDetails and statistics. Requests must include statistics
+            so field omission can be used for membership classification.
 
     Returns:
-        dict[str, str | int | None] | None: Normalized stream metadata, or None for an
-            ordinary non-stream upload.
+        dict[str, str | int | bool | None] | None: Normalized stream metadata including
+            is_members_only, or None for an ordinary non-stream upload.
     """
     snippet = item["snippet"]
     details = item.get("liveStreamingDetails", {})
@@ -47,6 +51,7 @@ def youtube_video(item):
         "scheduled": details.get("scheduledStartTime"), "started": details.get("actualStartTime"),
         "ended": details.get("actualEndTime"),
         "viewers": int(viewers) if viewers is not None and status == "LIVE" else None,
+        "is_members_only": "viewCount" not in item.get("statistics", {}),
     }
 
 
