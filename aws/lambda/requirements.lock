@@ -14,7 +14,7 @@ jmespath==1.1.0
     # via
     #   boto3
     #   botocore
-pg8000==1.31.5
+pg8000==1.31.6
     # via -r aws/lambda/requirements.txt
 python-dateutil==2.9.0.post0
     # via
