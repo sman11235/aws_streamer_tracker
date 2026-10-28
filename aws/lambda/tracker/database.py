@@ -510,6 +510,8 @@ class Store:
         """Insert video metadata or update it when the observation is not older.
 
         Preserve existing lifecycle timestamps when incoming timestamps are absent.
+        Persist an explicit membership flag, preserving an existing flag when the
+        snapshot omits it and defaulting new rows without one to False.
         Return the local video UUID, or None when a newer saved observation prevents
         the update. This method does not create a CCV sample.
 
@@ -518,7 +520,8 @@ class Store:
                 operations.
             channel_id (uuid.UUID | str): Local UUID of the channel owning the video.
             video (Mapping[str, Any]): Normalized video ID, title, status, optional
-                metadata, and lifecycle timestamps.
+                metadata, lifecycle timestamps, and optional is_members_only boolean.
+                An omitted/None membership flag preserves the stored classification.
             observed_at (datetime.datetime): Timezone-aware lookup start time used to reject
                 older snapshots.
 
@@ -529,11 +532,13 @@ class Store:
         rows = self.query(
             """INSERT INTO videos
                (channel_id, platform_video_id, title, description, thumbnail_url,
-                stream_status, scheduled_start_at, actual_start_at, actual_end_at, lifecycle_observed_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                stream_status, scheduled_start_at, actual_start_at, actual_end_at, lifecycle_observed_at,
+                is_members_only)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,FALSE))
                ON CONFLICT (channel_id, platform_video_id) DO UPDATE SET
                  title = EXCLUDED.title, description = EXCLUDED.description,
                  thumbnail_url = EXCLUDED.thumbnail_url, stream_status = EXCLUDED.stream_status,
+                 is_members_only = COALESCE(%s, videos.is_members_only),
                  scheduled_start_at = COALESCE(EXCLUDED.scheduled_start_at, videos.scheduled_start_at),
                  actual_start_at = COALESCE(EXCLUDED.actual_start_at, videos.actual_start_at),
                  actual_end_at = COALESCE(EXCLUDED.actual_end_at, videos.actual_end_at),
@@ -541,7 +546,8 @@ class Store:
                WHERE videos.lifecycle_observed_at IS NULL OR videos.lifecycle_observed_at <= EXCLUDED.lifecycle_observed_at
                RETURNING id""",
             (channel_id, video["id"], video["title"], video.get("description"), video.get("thumbnail"),
-             video["status"], video.get("scheduled"), video.get("started"), video.get("ended"), observed_at),
+             video["status"], video.get("scheduled"), video.get("started"), video.get("ended"), observed_at,
+             video.get("is_members_only"), video.get("is_members_only")),
         )
         return rows[0]["id"] if rows else None
 

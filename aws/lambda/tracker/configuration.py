@@ -106,6 +106,8 @@ def load_config(path):
                 raise ValueError(f"{section}.{name} must be a non-empty string")
     if Path(config["database"]["ca_bundle_filename"]).name != config["database"]["ca_bundle_filename"]:
         raise ValueError("database.ca_bundle_filename must be a filename without directories")
+    if not {"snippet", "liveStreamingDetails", "statistics"}.issubset(config["youtube"]["video_parts"]):
+        raise ValueError("youtube.video_parts must include snippet, liveStreamingDetails, and statistics")
     return config
 
 

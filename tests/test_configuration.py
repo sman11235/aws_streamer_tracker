@@ -18,6 +18,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
+    def test_youtube_statistics_cannot_be_omitted_from_video_requests(self):
+        """Reject request configurations that would misclassify every stream as members-only.
+
+        Args:
+            self (RuntimeConfigurationTests): Test instance loading modified YAML.
+
+        Returns:
+            None: Assert membership classification cannot run without requesting statistics.
+        """
+        with self.assertRaisesRegex(ValueError, "youtube.video_parts must include"):
+            self.load_modified(lambda config: config["youtube"]["video_parts"].remove("statistics"))
+
     def load_modified(self, modify):
         """Write a modified copy of runtime YAML and return the loader validation result.
 

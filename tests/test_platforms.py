@@ -9,6 +9,55 @@ from tracker.streams import youtube_video
 
 
 class PlatformTests(unittest.TestCase):
+    def test_youtube_video_request_includes_statistics_for_membership(self):
+        """Verify video requests fetch statistics before applying the membership rule.
+
+        Args:
+            self (PlatformTests): Test instance providing mocked API adapters.
+
+        Returns:
+            None: Assert one batched videos.list request includes every required part.
+        """
+        http = MagicMock()
+        http.json.return_value = {"items": [{"id": "one"}, {"id": "two"}]}
+        platforms = Platforms(aws=aws_mock(), http=http)
+        self.assertEqual(set(platforms.youtube_videos(["one", "two"])), {"one", "two"})
+        params = http.json.call_args.kwargs["params"]
+        self.assertEqual(params["id"], "one,two")
+        self.assertEqual(set(params["part"].split(",")), {"snippet", "liveStreamingDetails", "statistics"})
+
+    def test_youtube_membership_uses_view_count_presence_for_every_stream_status(self):
+        """Verify missing viewCount marks membership and present zero counts remain public.
+
+        Args:
+            self (PlatformTests): Test instance providing assertions for each response.
+
+        Returns:
+            None: Assert classification depends on field presence, across scheduled,
+            live, and ended streams, independently of CCV and title wording.
+        """
+        cases = [
+            ({}, True),
+            ({"statistics": {}}, True),
+            ({"statistics": {"likeCount": "10"}}, True),
+            ({"statistics": {"viewCount": "123"}}, False),
+            ({"statistics": {"viewCount": "0"}}, False),
+            ({"statistics": {"viewCount": 0}}, False),
+        ]
+        for status in ("SCHEDULED", "LIVE", "ENDED"):
+            for statistics, expected in cases:
+                with self.subTest(status=status, statistics=statistics):
+                    details = {"scheduledStartTime": "2026-10-28T12:00:00Z"}
+                    if status == "ENDED":
+                        details["actualEndTime"] = "2026-10-28T13:00:00Z"
+                    item = {
+                        "id": "video", "snippet": {"title": "Members-only", "liveBroadcastContent": "live" if status == "LIVE" else "none"},
+                        "liveStreamingDetails": details, **statistics,
+                    }
+                    video = youtube_video(item)
+                    self.assertEqual(video["status"], status)
+                    self.assertIs(video["is_members_only"], expected)
+
     def test_youtube_channel_request_batches_ids_and_selects_statistics(self):
         """Verify a channel request batches IDs and requests profile/statistics resource parts.
 

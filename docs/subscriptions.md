@@ -74,6 +74,16 @@ For Twitch terminal failures (`authorization_revoked`, `user_removed`, `version_
 
 Keep signing secrets stable. Subscription rows record SSM versions, and callbacks can verify the active and pending versions during renewal. Changing the latest SSM version causes renewal/recreation on the next reconciliation. This is not a zero-interruption rotation mechanism; retain previous SSM versions while migration is in progress.
 
+## YouTube members-only classification
+
+Video requests include `statistics` alongside `snippet` and `liveStreamingDetails` in `config/runtime.yaml`. Configuration validation requires all three parts. The application uses the requested rule: a returned video's `statistics.viewCount` key means `is_members_only = false`; an absent key, including an absent `statistics` object, means `is_members_only = true`. A value of `"0"` or `0` counts as present. CCV and title wording do not affect this classification.
+
+This is an application heuristic. YouTube documents `viewCount` as a view count and does not guarantee that its presence or absence identifies membership restrictions. See the [video resource reference](https://developers.google.com/youtube/data/reference/rest/v3/videos#statistics.viewCount). A video entirely absent from the API response remains unavailable; the poller preserves its previous database metadata instead of assigning a membership flag.
+
+Both the event worker and scheduled poller persist the flag through `Store.upsert_video`. Accepted newer observations can change it in either direction; stale observations cannot overwrite it. Snapshots without a membership classification preserve the existing value, with the existing default false used for new unclassified rows. Twitch snapshots do not apply the YouTube rule.
+
+No schema migration is required: `videos.is_members_only` already exists. After deployment, known live/scheduled YouTube streams are classified on their next successful poll and newly notified streams are classified by the event worker. Existing ended streams are not automatically backfilled; they need to be reprocessed using current video metadata.
+
 ## Failures and recovery
 
 `<project>-dev-ingestion-failures` retains failed events for 14 days. It receives EventBridge delivery failures, exhausted Lambda asynchronous invocations, and failed Scheduler deliveries. Inspect the message format before replay: EventBridge messages contain the event directly, while Lambda failure destinations wrap the original event in `requestPayload`. Fix the cause and manually invoke the appropriate function with the original payload. Receipts prevent repeated stream mutations.
