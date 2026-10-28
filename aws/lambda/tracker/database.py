@@ -506,12 +506,13 @@ class Store:
                ORDER BY v.last_polled_at NULLS FIRST, v.updated_at""",
         )
 
-    def upsert_video(self, channel_id, video, observed_at):
+    def upsert_video(self, channel_id, video, observed_at, *, polled_at=None):
         """Insert video metadata or update it when the observation is not older.
 
         Preserve existing lifecycle timestamps when incoming timestamps are absent.
         Persist an explicit membership flag, preserving an existing flag when the
         snapshot omits it and defaulting new rows without one to False.
+        Advance last_polled_at only when an actual polling time is supplied.
         Return the local video UUID, or None when a newer saved observation prevents
         the update. This method does not create a CCV sample.
 
@@ -524,6 +525,8 @@ class Store:
                 An omitted/None membership flag preserves the stored classification.
             observed_at (datetime.datetime): Timezone-aware lookup start time used to reject
                 older snapshots.
+            polled_at (datetime.datetime | None): Timezone-aware start of the successful
+                poll, or None for event-driven updates that preserve the last poll time.
 
         Returns:
             uuid.UUID | None: Local video UUID for an accepted insert/update, or None for a
@@ -533,12 +536,13 @@ class Store:
             """INSERT INTO videos
                (channel_id, platform_video_id, title, description, thumbnail_url,
                 stream_status, scheduled_start_at, actual_start_at, actual_end_at, lifecycle_observed_at,
-                is_members_only)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,FALSE))
+                is_members_only, last_polled_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,FALSE),%s)
                ON CONFLICT (channel_id, platform_video_id) DO UPDATE SET
                  title = EXCLUDED.title, description = EXCLUDED.description,
                  thumbnail_url = EXCLUDED.thumbnail_url, stream_status = EXCLUDED.stream_status,
                  is_members_only = COALESCE(%s, videos.is_members_only),
+                 last_polled_at = GREATEST(videos.last_polled_at, EXCLUDED.last_polled_at),
                  scheduled_start_at = COALESCE(EXCLUDED.scheduled_start_at, videos.scheduled_start_at),
                  actual_start_at = COALESCE(EXCLUDED.actual_start_at, videos.actual_start_at),
                  actual_end_at = COALESCE(EXCLUDED.actual_end_at, videos.actual_end_at),
@@ -547,15 +551,16 @@ class Store:
                RETURNING id""",
             (channel_id, video["id"], video["title"], video.get("description"), video.get("thumbnail"),
              video["status"], video.get("scheduled"), video.get("started"), video.get("ended"), observed_at,
-             video.get("is_members_only"), video.get("is_members_only")),
+             video.get("is_members_only"), polled_at, video.get("is_members_only")),
         )
         return rows[0]["id"] if rows else None
 
-    def end_twitch_streams(self, channel_id, observed_at, active_id=None):
+    def end_twitch_streams(self, channel_id, observed_at, active_id=None, *, polled_at=None):
         """End live Twitch broadcasts other than the optional active broadcast ID.
 
         With no active_id, end every live broadcast for the channel. Record the
         observation time as the end time because no precise end timestamp is known.
+        Record an optional polling time only on the broadcasts ended by this lookup.
 
         Args:
             self (Store): Store instance owning the connection, transactions, and database
@@ -566,15 +571,18 @@ class Store:
                 approximate end time.
             active_id (str | None): Current Twitch broadcast ID to preserve, or None to end
                 all live rows.
+            polled_at (datetime.datetime | None): Timezone-aware polling observation time,
+                or None for webhook updates that preserve each video's last polling time.
 
         Returns:
             None: Matching previous broadcasts are marked ENDED.
         """
         self.query(
-            """UPDATE videos SET stream_status = 'ENDED', actual_end_at = %s
+            """UPDATE videos SET stream_status = 'ENDED', actual_end_at = %s,
+               last_polled_at = GREATEST(last_polled_at, %s)
                WHERE channel_id = %s AND stream_status = 'LIVE'
                AND (%s::text IS NULL OR platform_video_id != %s)""",
-            (observed_at, channel_id, active_id, active_id),
+            (observed_at, polled_at, channel_id, active_id, active_id),
         )
 
     def sample(self, video_id, viewers, observed_at):

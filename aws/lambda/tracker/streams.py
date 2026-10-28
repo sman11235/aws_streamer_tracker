@@ -96,12 +96,13 @@ def apply_snapshot(store, channel, observed_at, video, *, provider, event_key=No
             rules.
         event_key (str | None): Optional delivery identity to deduplicate in the same
             transaction as mutations.
-        sample (bool): Whether an available concurrent viewer count should create a CCV
-            sample.
+        sample (bool): Whether this observation came from polling. Record its polling
+            time and create a CCV sample when a viewer count is available.
 
     Returns:
         str: Processing outcome: applied, duplicate, untracked, or stale.
     """
+    polled_at = observed_at if sample else None
     with store.atomic():
         current = store.channel(channel["id"], lock=True)
         if event_key and not store.receipt(provider, event_key):
@@ -111,10 +112,11 @@ def apply_snapshot(store, channel, observed_at, video, *, provider, event_key=No
         if provider == "twitch":
             if current["last_stream_observed_at"] and current["last_stream_observed_at"] >= observed_at:
                 return "stale"
-            store.end_twitch_streams(channel["id"], observed_at, video["id"] if video else None)
+            store.end_twitch_streams(channel["id"], observed_at, video["id"] if video else None,
+                                    polled_at=polled_at)
             store.query("UPDATE channels SET last_stream_observed_at = %s WHERE id = %s", (observed_at, channel["id"]))
         if video:
-            video_id = store.upsert_video(channel["id"], video, observed_at)
+            video_id = store.upsert_video(channel["id"], video, observed_at, polled_at=polled_at)
             if sample and video_id and video.get("viewers") is not None:
                 store.sample(video_id, video["viewers"], observed_at)
         return "applied"
