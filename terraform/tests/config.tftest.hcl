@@ -38,6 +38,10 @@ run "defaults_and_shared_bindings" {
     error_message = "Channel updates must receive stable schedule times and asynchronous failure handling."
   }
   assert {
+    condition     = alltrue([for schedule in aws_scheduler_schedule.jobs : strcontains(schedule.target[0].input, "<aws.scheduler.scheduled-time>")])
+    error_message = "Scheduler time placeholders must retain literal angle brackets in the raw target input so AWS can substitute them."
+  }
+  assert {
     condition     = alltrue([for schedule in aws_scheduler_schedule.jobs : schedule.state == "DISABLED"])
     error_message = "Schedules must remain disabled by default."
   }
