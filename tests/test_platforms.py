@@ -9,6 +9,46 @@ from tracker.streams import youtube_video
 
 
 class PlatformTests(unittest.TestCase):
+    def test_twitch_follower_total_uses_app_credentials_and_not_follower_list_length(self):
+        """Fetch the public aggregate even when Twitch returns no follower identities.
+
+        Args:
+            self (PlatformTests): Test instance providing mock AWS and HTTP adapters.
+
+        Returns:
+            None: Assert app authentication, broadcaster filtering, and a single count
+            request without following pagination or requesting individual users.
+        """
+        http = MagicMock()
+        http.json.side_effect = [
+            {"access_token": "app-token", "expires_in": 3600},
+            {"total": 12345, "data": [], "pagination": {"cursor": "unused"}},
+        ]
+        platforms = Platforms(aws=aws_mock(), http=http)
+        self.assertEqual(platforms.twitch_follower_count("1234"), 12345)
+        self.assertEqual(http.json.call_count, 2)
+        request = http.json.call_args
+        self.assertEqual(request.args, ("GET", "https://api.twitch.tv/helix/channels/followers"))
+        self.assertEqual(request.kwargs["params"], {"broadcaster_id": "1234", "first": 1})
+        self.assertEqual(request.kwargs["headers"]["Authorization"], "Bearer app-token")
+
+    def test_twitch_follower_total_preserves_zero_and_rejects_unknown_counts(self):
+        """Distinguish valid zero followers from missing, malformed, or negative totals.
+
+        Args:
+            self (PlatformTests): Test instance providing a mocked Helix adapter.
+
+        Returns:
+            None: Assert zero is returned and invalid responses raise ValueError.
+        """
+        platforms = Platforms()
+        platforms.twitch = MagicMock(return_value={"total": 0, "data": []})
+        self.assertEqual(platforms.twitch_follower_count("1234"), 0)
+        for result in ({}, {"total": None}, {"total": -1}, {"total": True}, {"total": "12"}, {"total": 1.5}):
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                platforms.twitch.return_value = result
+                platforms.twitch_follower_count("1234")
+
     def test_youtube_video_request_includes_statistics_for_membership(self):
         """Verify video requests fetch statistics before applying the membership rule.
 

@@ -17,7 +17,7 @@ REQUIRED_KEYS = {
     "channel_updates": "youtube_batch_size twitch_batch_size",
     "subscriptions": "batch_size pending_retry_seconds verification_timeout_seconds retry_base_seconds retry_max_seconds retry_exponent_cap",
     "youtube": "hub_url feed_url videos_url channels_url channel_parts video_parts requested_lease_seconds renewal_fraction max_refresh_interval_seconds max_accepted_lease_seconds polling_batch_size thumbnail_priority",
-    "twitch": "helix_url token_url token_validation_url subscriptions_path streams_path users_path token_validation_interval_seconds token_expiry_margin_seconds authorization_attempts subscription_page_size polling_batch_size message_max_age_seconds message_future_tolerance_seconds revocation_retry_seconds terminal_subscription_statuses thumbnail_width thumbnail_height",
+    "twitch": "helix_url token_url token_validation_url subscriptions_path streams_path users_path followers_path token_validation_interval_seconds token_expiry_margin_seconds authorization_attempts subscription_page_size polling_batch_size message_max_age_seconds message_future_tolerance_seconds revocation_retry_seconds terminal_subscription_statuses thumbnail_width thumbnail_height",
     "webhooks": "max_body_bytes",
     "events": "source_prefix detail_type",
     "environment": "event_bus_name database_host database_port database_name database_secret_arn database_ca_bundle youtube_secret twitch_secret twitch_client_id twitch_client_secret youtube_api_key youtube_callback twitch_callback",
@@ -99,7 +99,7 @@ def load_config(path):
         raise ValueError("twitch.helix_url must end with a slash")
     for section, names in {
         "logging": "level", "http": "user_agent", "database": "ca_bundle_filename",
-        "events": "source_prefix detail_type", "twitch": "subscriptions_path streams_path users_path",
+        "events": "source_prefix detail_type", "twitch": "subscriptions_path streams_path users_path followers_path",
     }.items():
         for name in names.split():
             if not isinstance(config[section][name], str) or not config[section][name]:

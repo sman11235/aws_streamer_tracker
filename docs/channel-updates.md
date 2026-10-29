@@ -11,11 +11,13 @@ Discovery is idempotent by platform/channel ID. Existing rows keep their owner, 
 | `channel_name` | Channel title | Display name |
 | `profile_picture_url` | Preferred available thumbnail | Profile image |
 | `description` | Channel description | Channel description |
-| `subscriber_count` | Public API count; rounded, or null when hidden/unavailable | Supplied follower count; null when unavailable |
+| `subscriber_count` | Public API count; rounded, or null when hidden/unavailable | Follower total from Get Channel Followers |
 | `total_views` | Reported channel view count | Null; deprecated Get Users `view_count` is invalid |
 | `video_count` | Reported public video count | Null; Get Users does not supply a video total |
 
-The updater uses [YouTube Channels: list](https://developers.google.com/youtube/v3/docs/channels/list) with `snippet,statistics` and [Twitch Get Users](https://dev.twitch.tv/docs/api/reference/#get-users). YouTube counts retain the API's precision; missing/hidden counts remain null, while a reported zero is saved as zero. For Twitch, the shared `subscriber_count` field represents followers. `twitch_channel` reads an optional `follower_count` supplied alongside the user profile, validates it, and passes it to the current channel and history snapshot. Get Users does not return follower counts, and the current adapter does not enrich the response, so scheduled refreshes still store null unless a follower count is supplied upstream. The [Get Channel Followers](https://dev.twitch.tv/docs/api/reference/#get-channel-followers) endpoint is the separate source for that total.
+The updater uses [YouTube Channels: list](https://developers.google.com/youtube/v3/docs/channels/list) with `snippet,statistics` and [Twitch Get Users](https://dev.twitch.tv/docs/api/reference/#get-users). YouTube counts retain the API's precision; missing/hidden counts remain null, while a reported zero is saved as zero. For each returned Twitch profile, `Platforms.twitch_follower_count` separately calls [Get Channel Followers](https://dev.twitch.tv/docs/api/reference/#get-channel-followers) with `broadcaster_id` and `first=1`, using the existing cached app token. It reads `total`, even when `data` is empty, and does not page through follower identities. Total-only access with an app token is also described in this [Twitch Developer Forums example](https://discuss.dev.twitch.com/t/get-followers-count/48066).
+
+The updater supplies that total as `follower_count` to `twitch_channel`, which normalizes it into `subscriber_count`. Both `channels.subscriber_count` and `channel_history.subscriber_count` therefore represent followers for Twitch. A genuine zero is saved as zero. A failed lookup or missing/invalid total fails only that channel's refresh, preserving its previous metadata/count/history, while other channels can commit successfully. The job then raises for its existing retry handling; a failure never invents zero followers or overwrites a known count with null.
 
 ## Deployment
 
@@ -32,7 +34,7 @@ Migration 002 adds `channels.description`, `channels.video_count`, and `channels
 
 ## Collection and recovery
 
-The job batches YouTube IDs in groups of 50 and Twitch IDs in groups of 100, alternating providers. Endpoints, API parts, thumbnail preferences, and batch sizes are in [`config/runtime.yaml`](../config/runtime.yaml). An advisory lock prevents overlapping updater runs. Attempt timestamps let later invocations prioritize channels not recently attempted, including when missing/deleted channels are returned or the time budget is exhausted.
+The job batches YouTube IDs in groups of 50 and Twitch profiles in groups of 100, alternating providers. Follower totals require one additional request per returned Twitch profile. Endpoints, including `twitch.followers_path`, API parts, thumbnail preferences, and batch sizes are in [`config/runtime.yaml`](../config/runtime.yaml). An advisory lock prevents overlapping updater runs. Remaining time is checked before each channel, so additional follower lookups can be deferred safely. Deferred channels retain their previous attempt timestamp and get priority over completed work on subsequent runs. Failed profile batches and missing/deleted channels are marked attempted so they do not starve other channels.
 
 Each valid channel response updates current fields and `channels.last_updated`, and inserts matching `channel_history` values, in one transaction. History timestamps represent when the API observation began, not when the cron was scheduled. Older observations cannot overwrite newer metadata. A channel untracked while the request is in flight is skipped.
 

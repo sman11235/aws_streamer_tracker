@@ -12,7 +12,7 @@ from uuid import uuid4
 from tests.support import SECRET, api_event, aws_mock, feed, twitch_event, youtube_channel_item
 from tracker.channels import update as update_channels, youtube_channel
 from tracker.database import Store
-from tracker.platforms import callback_url
+from tracker.platforms import Platforms, callback_url
 from tracker.runtime import utcnow
 from tracker.streams import apply_snapshot, handle, poll
 from tracker.subscriptions import eventsub, websub
@@ -148,6 +148,7 @@ class DatabaseWorkflowTests(unittest.TestCase):
         platforms = MagicMock()
         platforms.youtube_channels.return_value = {"UC-new": youtube_channel_item("UC-new")}
         platforms.twitch_users.return_value = {"5678": {"id": "5678", "display_name": "New Twitch"}}
+        platforms.twitch_follower_count.return_value = 42
         result = update_channels({}, None, store_factory=self.open_store, platforms=platforms)
         self.assertEqual((result["discovered"], result["updated"]), (2, 2))
         platforms.youtube_channels.assert_called_once_with(["UC-new"])
@@ -156,6 +157,62 @@ class DatabaseWorkflowTests(unittest.TestCase):
         self.assertEqual(rows, [{"platform_channel_id": "5678", "channel_name": "New Twitch"},
                                 {"platform_channel_id": "UC-new", "channel_name": "Updated channel"}])
         self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history")[0]["n"], 2)
+
+    def test_twitch_follower_totals_update_current_and_history_and_survive_api_failure(self):
+        """Persist live Helix follower aggregates in the shared subscriber count columns.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert profile/follower requests save positive and zero totals in
+            channels/history and an API failure preserves the last complete snapshot.
+        """
+        channel = self.channel("TWITCH")
+        user = {"id": "1234", "display_name": "Twitch channel"}
+        http = MagicMock()
+        http.json.side_effect = [
+            {"access_token": "app-token", "expires_in": 3600},
+            {"data": [user]}, {"total": 123, "data": []},
+            {"data": [user]}, {"total": 0, "data": []},
+            {"data": [user]}, RuntimeError("followers unavailable"),
+        ]
+        platforms = Platforms(aws=self.aws, http=http)
+        for expected in (123, 0):
+            with self.subTest(followers=expected):
+                result = update_channels({}, None, store_factory=self.open_store, platforms=platforms)
+                self.assertEqual(result["updated"], 1)
+                self.assertEqual(self.store.channel(channel["id"])["subscriber_count"], expected)
+                self.assertEqual(self.store.query("SELECT subscriber_count FROM channel_history ORDER BY observed_at DESC LIMIT 1")[0]["subscriber_count"], expected)
+        with self.assertLogs("tracker", level="ERROR"), self.assertRaises(RuntimeError):
+            update_channels({}, None, store_factory=self.open_store, platforms=platforms)
+        self.assertEqual(self.store.channel(channel["id"])["subscriber_count"], 0)
+        self.assertEqual(self.store.query("SELECT count(*) AS n FROM channel_history")[0]["n"], 2)
+
+    def test_deferred_twitch_follower_refresh_keeps_priority_for_next_run(self):
+        """Prevent later channels from starving when follower lookups exhaust the time budget.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert an unprocessed channel retains its unattempted state and is
+            selected ahead of the completed channel for the next refresh run.
+        """
+        self.channel("TWITCH", "111")
+        self.channel("TWITCH", "222")
+        platforms = MagicMock()
+        platforms.twitch_users.return_value = {
+            user_id: {"id": user_id, "display_name": user_id} for user_id in ("111", "222")
+        }
+        platforms.twitch_follower_count.return_value = 77
+        with patch("tracker.channels.has_time", side_effect=[True, True, False]):
+            result = update_channels({}, None, store_factory=self.open_store, platforms=platforms)
+        self.assertEqual((result["updated"], result["deferred"]), (1, 1))
+        completed = self.store.query("SELECT channel_id FROM channel_history")[0]["channel_id"]
+        candidates = self.store.channels_for_refresh("TWITCH", "next-run")
+        self.assertNotEqual(candidates[0]["id"], completed)
+        self.assertIsNone(candidates[0]["last_metadata_attempt_at"])
 
     def test_existing_streamer_new_platform_is_discovered_on_scheduled_retry(self):
         """Verify a newly linked platform is discovered on retry without reprocessing completed history.
@@ -172,6 +229,7 @@ class DatabaseWorkflowTests(unittest.TestCase):
         platforms = MagicMock()
         platforms.youtube_channels.return_value = {"UC-channel": youtube_channel_item()}
         platforms.twitch_users.return_value = {"1234": {"id": "1234", "display_name": "Added Twitch"}}
+        platforms.twitch_follower_count.return_value = 123
         event = {"scheduled_at": utcnow().isoformat()}
         first = update_channels(event, None, store_factory=self.open_store, platforms=platforms)
         original = self.store.query("SELECT * FROM channels")[0]
