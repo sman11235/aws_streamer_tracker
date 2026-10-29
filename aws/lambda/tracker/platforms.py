@@ -242,6 +242,33 @@ class Platforms:
         })
         return {channel["id"]: channel for channel in result["items"]}
 
+    def twitch_follower_count(self, broadcaster_id):
+        """Fetch a broadcaster's follower total using the cached Twitch app token.
+
+        Request the smallest page and read total instead of counting follower
+        identities. No user_id filter or follower-list permission is needed for
+        the public aggregate. Reject missing or malformed totals instead of
+        recording an unknown count as zero.
+
+        Args:
+            self (Platforms): Platform client holding AWS/HTTP adapters and app token.
+            broadcaster_id (str): Numeric Twitch broadcaster ID whose total to fetch.
+
+        Returns:
+            int: Nonnegative follower total, including a genuine zero.
+
+        Raises:
+            ValueError: Twitch omits total or returns a noninteger/negative value.
+            ApiError: The follower lookup fails after the usual authorization retry.
+        """
+        result = self.twitch("GET", CONFIG["twitch"]["followers_path"], params={
+            "broadcaster_id": broadcaster_id, "first": 1,
+        })
+        total = result.get("total")
+        if type(total) is not int or total < 0:
+            raise ValueError("Twitch follower total must be a nonnegative integer")
+        return total
+
     def twitch_users(self, user_ids):
         """Fetch one batch of public Twitch user profiles keyed by user ID.
 

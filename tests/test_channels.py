@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.support import twitch_user_item, youtube_channel_item
 from tracker.channels import optional_count, twitch_channel, update, youtube_channel
@@ -112,7 +112,8 @@ class ChannelUpdateTests(unittest.TestCase):
         self.store.save_channel_snapshot.return_value = "updated"
         self.platforms = MagicMock()
         self.platforms.youtube_channels.return_value = {"UC-channel": youtube_channel_item()}
-        self.platforms.twitch_users.return_value = {"1234": twitch_user_item(follower_count=123)}
+        self.platforms.twitch_users.return_value = {"1234": twitch_user_item()}
+        self.platforms.twitch_follower_count.return_value = 123
 
     def invoke(self, event=None, context=None):
         """Run the channel updater with test adapters and an optional event or Lambda context.
@@ -146,10 +147,47 @@ class ChannelUpdateTests(unittest.TestCase):
         self.assertEqual(result["updated"], 2)
         self.platforms.youtube_channels.assert_called_once_with(["UC-channel"])
         self.platforms.twitch_users.assert_called_once_with(["1234"])
+        self.platforms.twitch_follower_count.assert_called_once_with("1234")
         keys = [call.args[3] for call in self.store.save_channel_snapshot.call_args_list]
         self.assertEqual(keys, ["scheduled:2026-10-26T12:00:00+00:00"] * 2)
         twitch_metadata = self.store.save_channel_snapshot.call_args_list[1].args[1]
         self.assertEqual(twitch_metadata["subscriber_count"], 123)
+
+    def test_follower_failure_does_not_save_unknown_count_or_discard_other_provider(self):
+        """Keep an existing Twitch snapshot intact when fetching its follower total fails.
+
+        Args:
+            self (ChannelUpdateTests): Test instance holding platform/store adapters.
+
+        Returns:
+            None: Assert YouTube succeeds, Twitch is not overwritten, and the job
+            raises to activate retries for the failed channel.
+        """
+        self.platforms.twitch_follower_count.side_effect = RuntimeError("followers unavailable")
+        with self.assertLogs("tracker", level="ERROR"), self.assertRaises(RuntimeError):
+            self.invoke()
+        self.store.save_channel_snapshot.assert_called_once()
+        self.assertEqual(self.store.save_channel_snapshot.call_args.args[0], "local-youtube")
+
+    def test_follower_lookups_stop_between_channels_near_deadline(self):
+        """Defer remaining Twitch channels before starting another follower request.
+
+        Args:
+            self (ChannelUpdateTests): Test instance holding platform/store adapters.
+
+        Returns:
+            None: Assert one channel saves successfully and the next is deferred
+            without making another follower lookup when time runs short.
+        """
+        second = {"id": "second", "platform_channel_id": "5678"}
+        self.store.channels_for_refresh.side_effect = lambda provider, key: [] if provider == "YOUTUBE" else [self.twitch, second]
+        self.platforms.twitch_users.return_value["5678"] = twitch_user_item("5678")
+        with patch("tracker.channels.has_time", side_effect=[True, True, False]):
+            result = self.invoke()
+        self.assertEqual((result["updated"], result["deferred"]), (1, 1))
+        self.platforms.twitch_follower_count.assert_called_once_with("1234")
+        self.store.mark_metadata_attempt.assert_called_once()
+        self.assertEqual(self.store.mark_metadata_attempt.call_args.args[0], ["local-twitch"])
 
     def test_discovers_streamer_channels_before_selecting_refresh_candidates(self):
         """Verify streamer-linked channels are discovered before refresh candidate selection.

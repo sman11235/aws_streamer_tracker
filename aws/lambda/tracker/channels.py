@@ -111,7 +111,7 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
         store_factory (Callable[[], ContextManager[Store]]): Factory opening a store for
             discovery, refresh selection, and atomic history updates.
         platforms (Platforms): Injectable adapter supplying batched YouTube channel and
-            Twitch user lookups.
+            Twitch user lookups, plus a follower-total lookup per Twitch broadcaster.
 
     Returns:
         dict[str, int | str]: Discovery/refresh outcome counters, or an overlapping-job
@@ -145,17 +145,22 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                 continue
             observed_at = utcnow()
             try:
-                # Rotate even missing/deleted channels and failed batches behind
-                # unattempted channels if the invocation runs out of time.
-                store.mark_metadata_attempt([channel["id"] for channel in batch], observed_at)
                 ids = [channel["platform_channel_id"] for channel in batch]
                 items = platforms.youtube_channels(ids) if provider == "youtube" else platforms.twitch_users(ids)
             except Exception:
+                # A failed profile batch was attempted; rotate it behind other work.
+                store.mark_metadata_attempt([channel["id"] for channel in batch], observed_at)
                 counts["failed"] += len(batch)
                 LOG.exception("Channel metadata batch failed: provider=%s", provider)
                 continue
             for channel in batch:
+                if not has_time(context, started):
+                    counts["deferred"] += 1
+                    continue
                 try:
+                    # Deferred channels retain priority over completed work, including
+                    # when per-channel follower lookups consume the remaining budget.
+                    store.mark_metadata_attempt([channel["id"]], observed_at)
                     item = items.get(channel["platform_channel_id"])
                     if item is None:
                         counts["missing"] += 1
@@ -163,6 +168,8 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                         continue
                     if item["id"] != channel["platform_channel_id"]:
                         raise ValueError("Platform returned a different channel")
+                    if provider == "twitch":
+                        item = {**item, "follower_count": platforms.twitch_follower_count(item["id"])}
                     metadata = youtube_channel(item) if provider == "youtube" else twitch_channel(item)
                     outcome = store.save_channel_snapshot(channel["id"], metadata, observed_at, collection_key)
                     counts[outcome] += 1

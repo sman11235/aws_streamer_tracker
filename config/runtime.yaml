@@ -54,6 +54,7 @@ twitch:
   subscriptions_path: eventsub/subscriptions
   streams_path: streams
   users_path: users
+  followers_path: channels/followers
   token_validation_interval_seconds: 3600
   token_expiry_margin_seconds: 60
   authorization_attempts: 2
