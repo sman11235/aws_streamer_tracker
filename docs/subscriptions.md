@@ -30,9 +30,10 @@ Notifications flow through the existing EventBridge bus. Webhook handlers acknow
    ```sh
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/001_subscriptions.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/002_channel_updates.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/003_unique_platform_ids.sql
    ```
 
-   For a new database, first apply `db/schema.sql`, then all numbered migrations in order. The migration adds tracking flags, lifecycle ordering, subscription records, processed-event receipts, and incremental CCV aggregates. It preserves existing application records and can be reapplied. Keep your database connection credentials local.
+   For a new database, first apply `db/schema.sql`, then all numbered migrations in order. The migrations add tracking flags, lifecycle ordering, subscription records, processed-event receipts, incremental CCV aggregates, channel metadata/history fields, and global platform-ID uniqueness. They preserve existing application records and can be reapplied. Check for duplicate IDs before applying migration 003; see the [constraint guide](database-constraints.md). Keep your database connection credentials local.
 
 3. Create these SSM SecureString parameters, using the AWS-managed SSM encryption key unless you also grant the Lambda roles permission to decrypt your custom KMS key:
 

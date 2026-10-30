@@ -127,6 +127,94 @@ class DatabaseWorkflowTests(unittest.TestCase):
             (self.vtuber, platform, platform_id or ("1234" if platform == "TWITCH" else "UC-channel")),
         )[0]
 
+    def test_platform_channel_ids_are_unique_across_platforms(self):
+        """Reject reuse of a channel ID even when the requested platform differs.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert the global channel constraint rejects the duplicate and keeps
+            the original channel UUID and platform unchanged.
+        """
+        import pg8000.dbapi
+
+        original = self.channel("TWITCH", "shared-channel-id")
+        with self.assertRaises(pg8000.dbapi.DatabaseError) as error:
+            self.channel("YOUTUBE", "shared-channel-id")
+        self.assertEqual(error.exception.args[0]["C"], "23505")
+        self.assertEqual(self.store.query("SELECT id, platform FROM channels"),
+                         [{"id": original["id"], "platform": "TWITCH"}])
+
+    def test_platform_video_ids_are_unique_across_channels_and_upserts_preserve_owner(self):
+        """Reject a reused video ID on another channel while allowing its owner's updates.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert uniqueness spans channels/platforms and conflicting upserts
+            cannot move an existing video's UUID or ownership.
+        """
+        import pg8000.dbapi
+
+        original = self.channel("TWITCH")
+        other = self.channel("YOUTUBE")
+        now = utcnow()
+        video = {"id": "shared-video-id", "title": "Original", "status": "LIVE"}
+        video_id = self.store.upsert_video(original["id"], video, now)
+        with self.assertRaises(pg8000.dbapi.DatabaseError) as error:
+            self.store.upsert_video(other["id"], {**video, "title": "Wrong owner"}, now)
+        self.assertEqual(error.exception.args[0]["C"], "23505")
+        self.assertEqual(self.store.upsert_video(original["id"], {**video, "title": "Updated"},
+                                                now + timedelta(seconds=1)), video_id)
+        self.assertEqual(self.store.query("SELECT id, channel_id, title FROM videos"),
+                         [{"id": video_id, "channel_id": original["id"], "title": "Updated"}])
+
+    def test_global_id_migration_preserves_legacy_duplicates_on_failure_and_is_repeatable(self):
+        """Upgrade legacy constraints atomically and preserve all rows if duplicate IDs exist.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert a duplicate aborts both constraint additions without losing
+            videos/CCV, then a corrected fixture upgrades successfully and can reapply.
+        """
+        import pg8000.dbapi
+
+        self.store.query("ALTER TABLE channels DROP CONSTRAINT channels_platform_channel_id_key")
+        self.store.query("ALTER TABLE videos DROP CONSTRAINT videos_platform_video_id_key")
+        first = self.channel("TWITCH")
+        second = self.channel("YOUTUBE")
+        now = utcnow()
+        video = {"id": "legacy-duplicate", "title": "Legacy", "status": "LIVE"}
+        first_id = self.store.upsert_video(first["id"], video, now)
+        second_id = self.store.upsert_video(second["id"], video, now)
+        self.store.sample(first_id, 42, now)
+        migration = (ROOT / "db/migrations/003_unique_platform_ids.sql").read_text()
+        with self.assertRaises(pg8000.dbapi.DatabaseError) as error:
+            self.store.query(migration)
+        self.assertEqual(error.exception.args[0]["C"], "23505")
+        self.store.query("ROLLBACK")
+        constraints = self.store.query(
+            """SELECT conname FROM pg_constraint
+               WHERE conrelid IN ('channels'::regclass, 'videos'::regclass)
+                 AND conname IN ('channels_platform_channel_id_key', 'videos_platform_video_id_key')""",
+        )
+        self.assertEqual(constraints, [])
+        self.assertEqual({row["id"] for row in self.store.query("SELECT id FROM videos")}, {first_id, second_id})
+        self.assertEqual(self.store.query("SELECT ccv FROM ccv"), [{"ccv": 42}])
+
+        # Simulate an operator correcting the legacy fixture's wrong platform ID.
+        self.store.query("UPDATE videos SET platform_video_id = 'corrected-id' WHERE id = %s", (second_id,))
+        self.store.query(migration)
+        self.store.query(migration)
+        self.assertEqual({row["id"] for row in self.store.query("SELECT id FROM videos")}, {first_id, second_id})
+        self.assertEqual(self.store.query("SELECT ccv FROM ccv"), [{"ccv": 42}])
+        with self.assertRaises(pg8000.dbapi.DatabaseError):
+            self.store.upsert_video(second["id"], video, now + timedelta(seconds=1))
+
     def test_refresh_discovers_new_streamer_channels_and_records_history(self):
         """Verify streamer IDs alone create both platform channels and matching metadata history.
 

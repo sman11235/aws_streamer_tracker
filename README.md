@@ -44,6 +44,8 @@ Follow the [AWS deployment setup](docs/aws-deployment.md) to bootstrap the state
 
 Terraform provisions a private Amazon RDS PostgreSQL instance. Its master password is generated and stored by RDS in Secrets Manager. Apply [`db/schema.sql`](db/schema.sql), followed by all numbered files in [`db/migrations`](db/migrations), with a PostgreSQL client that can reach the private database (for example, through a VPN, bastion host, or an approved migration job). For an existing database, apply only outstanding migrations in order.
 
+Platform channel IDs and platform video IDs are each unique across their entire table. Apply [migration 003](db/migrations/003_unique_platform_ids.sql) to enforce this on an existing database; see [duplicate checks and migration instructions](docs/database-constraints.md). UUID primary keys and existing ownership/history are preserved.
+
 For local administration, the [database access helper](docs/database-access.md) starts the configured EC2 helper, opens a Session Manager tunnel, and launches your saved DBeaver connection. Source its Bash wrapper from `.bashrc` to use `streamer_db`; non-secret defaults are in [`config/database-access.yaml`](config/database-access.yaml).
 
 An optional [VTuber seed](db/seeds/README.md) populates `streamer_info` with sourced channel IDs and generation names. Its SQL is safe to rerun and preserves existing records; review its roster coverage and field conventions before importing.
