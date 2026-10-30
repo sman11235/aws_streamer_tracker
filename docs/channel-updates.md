@@ -21,16 +21,17 @@ The updater supplies that total as `follower_count` to `twitch_channel`, which n
 
 ## Deployment
 
-Apply migrations in order from a machine with access to the private database. If migration 001 is already applied, only apply 002:
+Apply outstanding migrations in order from a machine with access to the private database. If migration 001 is already applied, apply 002 and 003 as needed:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/002_channel_updates.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/003_unique_platform_ids.sql
 python3 scripts/build_lambda_zips.py
 ```
 
 Then deploy the updated Terraform and ZIPs through the existing workflow. Apply the migration **before deploying** if tracking schedules are already enabled. The job uses the existing YouTube API-key and Twitch client-credential SSM parameters; no new secret is needed. Its role can read those parameters and the RDS secret. It has the existing logging, asynchronous retry, alarm, and failure-queue configuration.
 
-Migration 002 adds `channels.description`, `channels.video_count`, and `channels.last_metadata_attempt_at`; adds `channel_history.description` and `channel_history.collection_key`; and adds refresh-order and per-run uniqueness indexes. Existing rows are preserved and the migration is repeatable. The base schema remains unchanged; new databases need the base schema followed by every numbered migration.
+Migration 002 adds `channels.description`, `channels.video_count`, and `channels.last_metadata_attempt_at`; adds `channel_history.description` and `channel_history.collection_key`; and adds refresh-order and per-run uniqueness indexes. Migration 003 enforces globally unique platform channel/video IDs; check existing data using the [constraint guide](database-constraints.md). Existing rows are preserved and the migrations are repeatable. New databases need the base schema followed by every numbered migration.
 
 ## Collection and recovery
 

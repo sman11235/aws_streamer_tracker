@@ -11,7 +11,7 @@ from xml.etree.ElementTree import ParseError
 from tracker.configuration import CONFIG
 from tracker.database import Store
 from tracker.platforms import callback_url, youtube_entries
-from tracker.runtime import AWS_CLIENT, LOG, raw_body, response, timestamp, utcnow
+from tracker.runtime import AWS_CLIENT, LOG, logged_job, raw_body, response, timestamp, utcnow
 
 
 def valid_mac(body, signature, secret, algorithm):
@@ -50,6 +50,7 @@ def signing_secrets(aws, env, subscription):
     return [aws.setting(env, version)[0] for version in versions if version is not None]
 
 
+@logged_job("handle-youtube-notifs")
 def youtube(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
     """Validate a YouTube verification request or signed Atom notification.
 
@@ -89,12 +90,15 @@ def youtube(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
             if not any(valid_mac(body, headers.get("x-hub-signature"), secret, "sha1") for secret in secrets):
                 # Google's PubSubHubbub 0.4 protocol acknowledges invalid HMACs
                 # but requires discarding them rather than processing them.
+                LOG.warning("YouTube notification discarded: subscription_id=%s reason=invalid_signature", sub["id"])
                 return response(204)
             if not sub["desired"] or not sub["is_tracked"]:
+                LOG.debug("YouTube notification discarded: subscription_id=%s reason=untracked", sub["id"])
                 return response(204)
             details = []
             for entry in youtube_entries(body):
                 if entry["platform_channel_id"] != sub["platform_channel_id"]:
+                    LOG.warning("YouTube notification rejected: subscription_id=%s reason=channel_mismatch", sub["id"])
                     return response(400)
                 timestamp(entry["updated"])
                 details.append({
@@ -103,8 +107,11 @@ def youtube(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
                     "occurred_at": entry["updated"],
                 })
             aws.publish("youtube", details)
+            LOG.info("YouTube notification accepted: subscription_id=%s channel_id=%s published_events=%d",
+                     sub["id"], sub["channel_id"], len(details))
             return response(204)
-    except (ValueError, ParseError, DefusedXmlException):
+    except (ValueError, ParseError, DefusedXmlException) as error:
+        LOG.warning("YouTube webhook rejected: reason=invalid_request error=%s", type(error).__name__)
         return response(400)
     except Exception:
         LOG.exception("YouTube webhook failed")
@@ -137,6 +144,7 @@ def youtube_challenge(store, sub, query):
     if mode == "denied":
         if sub.get("pending_action"):
             store.update_subscription(sub["id"], last_error="Hub denied the subscription", status="denied")
+            LOG.warning("WebSub subscription denied: subscription_id=%s channel_id=%s", sub["id"], sub["channel_id"])
         return response(204)
     if mode != sub.get("pending_action") or not query.get("hub.challenge"):
         return response(404)
@@ -159,14 +167,18 @@ def youtube_challenge(store, sub, query):
             )),
             pending_action=None, pending_since=None, retry_at=None, last_error=None, attempt_count=0,
         )
+        LOG.info("WebSub subscription verified: subscription_id=%s channel_id=%s lease_seconds=%d",
+                 sub["id"], sub["channel_id"], lease)
     else:
         store.update_subscription(
             sub["id"], status="unsubscribed", pending_action=None, pending_since=None,
             lease_expires_at=None, renew_at=None, retry_at=None, last_error=None,
         )
+        LOG.info("WebSub unsubscribe verified: subscription_id=%s channel_id=%s", sub["id"], sub["channel_id"])
     return response(200, query["hub.challenge"])
 
 
+@logged_job("handle-twitch-notifs")
 def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
     """Authenticate and handle Twitch challenges, notifications, and revocations.
 
@@ -199,6 +211,7 @@ def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
             return response(400)
         age = (utcnow() - timestamp(sent_at)).total_seconds()
         if age > CONFIG["twitch"]["message_max_age_seconds"] or age < -CONFIG["twitch"]["message_future_tolerance_seconds"]:
+            LOG.warning("Twitch webhook rejected: reason=message_age age_seconds=%.1f", age)
             return response(403)
         body = raw_body(event)
         query = event.get("queryStringParameters") or {}
@@ -209,6 +222,7 @@ def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
             secrets = signing_secrets(aws, "twitch_secret", sub)
             signed = message_id.encode() + sent_at.encode() + body
             if not any(valid_mac(signed, headers.get("twitch-eventsub-message-signature"), secret, "sha256") for secret in secrets):
+                LOG.warning("Twitch webhook rejected: subscription_id=%s reason=invalid_signature", sub["id"])
                 return response(403)
             notification = json.loads(body)
             if not isinstance(notification, dict) or not isinstance(notification.get("subscription"), dict):
@@ -222,6 +236,7 @@ def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
                 or provider_sub.get("condition", {}).get("broadcaster_user_id") != sub["platform_channel_id"]
                 or provider_sub.get("transport", {}).get("callback") != callback_url(sub)
             ):
+                LOG.warning("Twitch webhook rejected: subscription_id=%s reason=subscription_mismatch", sub["id"])
                 return response(403)
             kind = headers.get("twitch-eventsub-message-type")
             provider_id = provider_sub.get("id")
@@ -246,8 +261,11 @@ def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
                     secret_version=sub["pending_secret_version"], pending_secret_version=None,
                     pending_action=None, pending_since=None, retry_at=None, last_error=None, attempt_count=0,
                 )
+                LOG.info("EventSub subscription verified: subscription_id=%s channel_id=%s event_type=%s",
+                         sub["id"], sub["channel_id"], sub["event_type"])
                 return response(200, challenge)
             if provider_id != sub.get("provider_subscription_id"):
+                LOG.warning("Twitch webhook rejected: subscription_id=%s reason=remote_id_mismatch", sub["id"])
                 return response(403)
             if kind == "revocation":
                 with store.atomic():
@@ -256,10 +274,13 @@ def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
                             sub["id"], status=provider_sub.get("status", "revoked"),
                             last_error="Twitch revoked the subscription", retry_at=utcnow() + timedelta(seconds=CONFIG["twitch"]["revocation_retry_seconds"]),
                         )
+                        LOG.warning("EventSub subscription revoked: subscription_id=%s channel_id=%s event_type=%s",
+                                    sub["id"], sub["channel_id"], sub["event_type"])
                 return response(204)
             if kind != "notification":
                 return response(400)
             if not sub["desired"] or not sub["is_tracked"]:
+                LOG.debug("Twitch notification discarded: subscription_id=%s reason=untracked", sub["id"])
                 return response(204)
             if not isinstance(notification.get("event"), dict) or notification["event"].get("broadcaster_user_id") != sub["platform_channel_id"]:
                 return response(403)
@@ -267,8 +288,11 @@ def twitch(event, context, *, store_factory=Store.open, aws=AWS_CLIENT):
                 "provider": "twitch", "kind": sub["event_type"], "event_key": message_id,
                 "channel_id": str(sub["channel_id"]), "occurred_at": sent_at,
             }])
+            LOG.info("Twitch notification accepted: subscription_id=%s channel_id=%s event_type=%s published_events=1",
+                     sub["id"], sub["channel_id"], sub["event_type"])
             return response(204)
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError) as error:
+        LOG.warning("Twitch webhook rejected: reason=invalid_request error=%s", type(error).__name__)
         return response(400)
     except Exception:
         LOG.exception("Twitch webhook failed")

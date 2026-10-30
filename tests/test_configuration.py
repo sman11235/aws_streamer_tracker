@@ -99,6 +99,8 @@ class RuntimeConfigurationTests(unittest.TestCase):
             ("channel_updates", "twitch_batch_size", 101),
             ("http", "timeout_seconds", 0),
             ("http", "timeout_seconds", True),
+            ("streams", "inactivity_timeout_seconds", 0),
+            ("streams", "inactivity_timeout_seconds", True),
             ("youtube", "hub_url", "http://example.com/"),
             ("twitch", "helix_url", "https://example.com?token=secret"),
         ]

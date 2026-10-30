@@ -24,6 +24,8 @@ database:
 jobs:
   remaining_time_reserve_seconds: 25
   local_time_budget_seconds: 90
+streams:
+  inactivity_timeout_seconds: 600  # Infer an end after ten minutes without a LIVE observation.
 channel_updates:
   youtube_batch_size: 50
   twitch_batch_size: 100

@@ -1,12 +1,13 @@
 """Reconcile authoritative platform snapshots and persist CCV samples."""
 
 from itertools import zip_longest
+from datetime import timedelta
 import time
 
 from tracker.configuration import CONFIG
 from tracker.database import Store
 from tracker.platforms import PLATFORMS
-from tracker.runtime import LOG, has_time, utcnow
+from tracker.runtime import LOG, has_time, logged_job, utcnow
 
 
 def youtube_video(item):
@@ -122,6 +123,7 @@ def apply_snapshot(store, channel, observed_at, video, *, provider, event_key=No
         return "applied"
 
 
+@logged_job("handle-stream-events")
 def handle(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
     """Process one EventBridge lifecycle event using current platform metadata.
 
@@ -159,9 +161,11 @@ def handle(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
         raise ValueError("Unexpected stream event")
     with store_factory() as store:
         if store.processed(provider, detail["event_key"]):
+            LOG.debug("Stream event skipped: provider=%s channel_id=%s reason=duplicate", provider, detail["channel_id"])
             return {"status": "duplicate"}
         channel = store.channel(detail["channel_id"])
         if not channel or not channel["is_tracked"]:
+            LOG.debug("Stream event skipped: provider=%s channel_id=%s reason=untracked", provider, detail["channel_id"])
             return {"status": "untracked"}
         if str(channel["platform"]).lower() != provider:
             raise ValueError("Event platform does not match the channel")
@@ -179,6 +183,9 @@ def handle(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                 raise RuntimeError("Twitch stream metadata is not available yet")
             video = twitch_video(item) if item else None
         status = apply_snapshot(store, channel, observed_at, video, provider=provider, event_key=detail["event_key"])
+        LOG.info("Stream event reconciled: provider=%s kind=%s channel_id=%s video_id=%s stream_status=%s outcome=%s",
+                 provider, detail["kind"], channel["id"], video["id"] if video else None,
+                 video["status"] if video else "offline_or_non_stream", status)
         return {"status": status}
 
 
@@ -197,12 +204,15 @@ def chunks(items, size):
     return [items[index:index + size] for index in range(0, len(items), size)]
 
 
+@logged_job("get-stream-stats")
 def poll(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
     """Poll tracked Twitch channels and known live/scheduled YouTube videos.
 
     Batch requests within configured API limits, alternate providers, and defer
     work near the invocation deadline. Reconcile lifecycle state and save known
     viewer counts transactionally. Keep successful batches when another fails.
+    After polling, infer ends for LIVE videos with no successful live metadata
+    within the configured inactivity window, even when batches fail or are deferred.
 
     Args:
         event (dict[str, Any]): Scheduler payload; no fields are required by this
@@ -222,12 +232,16 @@ def poll(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
         RuntimeError: At least one polling batch failed and requires a retry.
     """
     started = time.monotonic()
-    result = {"sampled_channels": 0, "failed_batches": 0, "deferred_batches": 0}
+    result = {"sampled_channels": 0, "failed_batches": 0, "deferred_batches": 0, "timed_out_streams": 0}
+    observations = {"applied": 0, "stale": 0, "untracked": 0, "missing_youtube": 0, "non_stream_youtube": 0}
     with store_factory() as store:
         if not store.lock_job("get-stream-stats"):
             return {"skipped": "already running"}
         twitch_batches = chunks(store.channels("TWITCH"), CONFIG["twitch"]["polling_batch_size"])
         youtube_batches = chunks(store.pending_videos(), CONFIG["youtube"]["polling_batch_size"])
+        LOG.info("Stream polling work selected: twitch_channels=%d youtube_videos=%d twitch_batches=%d youtube_batches=%d inactivity_timeout_seconds=%d",
+                 sum(map(len, twitch_batches)), sum(map(len, youtube_batches)), len(twitch_batches), len(youtube_batches),
+                 CONFIG["streams"]["inactivity_timeout_seconds"])
         # Alternate providers so a large Twitch backlog cannot starve YouTube.
         batches = [(kind, batch) for pair in zip_longest(twitch_batches, youtube_batches)
                    for kind, batch in zip(("twitch", "youtube"), pair) if batch]
@@ -236,33 +250,46 @@ def poll(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                 result["deferred_batches"] += 1
                 continue
             try:
+                LOG.debug("Polling batch: provider=%s items=%d", provider, len(batch))
                 observed_at = utcnow()
                 if provider == "twitch":
                     streams = platforms.twitch_streams([channel["platform_channel_id"] for channel in batch])
                     for channel in batch:
                         item = streams.get(channel["platform_channel_id"])
-                        apply_snapshot(store, channel, observed_at, twitch_video(item) if item else None,
-                                       provider=provider, sample=True)
+                        outcome = apply_snapshot(store, channel, observed_at, twitch_video(item) if item else None,
+                                                 provider=provider, sample=True)
+                        observations[outcome] += 1
                         result["sampled_channels"] += 1
                 else:
                     videos = platforms.youtube_videos([video["platform_video_id"] for video in batch])
                     for row in batch:
                         store.query(
-                            "UPDATE videos SET last_polled_at = %s WHERE channel_id = %s AND platform_video_id = %s",
+                            "UPDATE videos SET last_polled_at = GREATEST(last_polled_at, %s) WHERE channel_id = %s AND platform_video_id = %s",
                             (observed_at, row["channel_id"], row["platform_video_id"]),
                         )
                         item = videos.get(row["platform_video_id"])
                         if not item:
+                            observations["missing_youtube"] += 1
                             continue
                         if item["snippet"]["channelId"] != row["platform_channel_id"]:
                             raise ValueError("YouTube video belongs to another channel")
-                        apply_snapshot(store, {"id": row["channel_id"]}, observed_at, youtube_video(item),
-                                       provider=provider, sample=True)
+                        video = youtube_video(item)
+                        if video is None:
+                            observations["non_stream_youtube"] += 1
+                        outcome = apply_snapshot(store, {"id": row["channel_id"]}, observed_at, video,
+                                                 provider=provider, sample=True)
+                        observations[outcome] += 1
                         result["sampled_channels"] += 1
             except Exception:
                 result["failed_batches"] += 1
-                LOG.exception("Polling batch failed: provider=%s", provider)
-    LOG.info("Stream polling: %s", result)
+                LOG.exception("Polling batch failed: provider=%s items=%d", provider, len(batch))
+        result["timed_out_streams"] = store.expire_stale_streams(
+            utcnow(), timedelta(seconds=CONFIG["streams"]["inactivity_timeout_seconds"]),
+        )
+        if result["timed_out_streams"]:
+            LOG.warning("Stream inactivity timeout: ended_streams=%d timeout_seconds=%d",
+                        result["timed_out_streams"], CONFIG["streams"]["inactivity_timeout_seconds"])
+    LOG.info("Stream polling: counts=%s observations=%s deferred_reason=invocation_budget", result, observations)
     if result["failed_batches"]:
         raise RuntimeError("Some polling batches failed; successful samples were committed")
     return result

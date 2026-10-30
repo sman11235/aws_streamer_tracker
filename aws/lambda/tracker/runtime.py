@@ -2,6 +2,7 @@
 
 import base64
 from datetime import datetime, timezone
+from functools import wraps
 import hashlib
 import json
 import logging
@@ -15,6 +16,60 @@ from tracker.configuration import CONFIG, environment
 
 LOG = logging.getLogger("tracker")
 LOG.setLevel(CONFIG["logging"]["level"])
+
+
+def logged_job(name):
+    """Add bounded invocation logs without serializing events, results, or exceptions.
+
+    Args:
+        name (str): Stable deployed Lambda name used to identify the job in logs.
+
+    Returns:
+        Callable[[Callable[..., dict]], Callable[..., dict]]: Decorator preserving the
+            handler's metadata, return value, and exception behavior.
+    """
+    def decorate(handler):
+        """Wrap a Lambda handler with start, finish, and safe failure logging.
+
+        Args:
+            handler (Callable[..., dict]): Handler accepting an event and Lambda context.
+
+        Returns:
+            Callable[..., dict]: Handler wrapper with invocation-level logging.
+        """
+        @wraps(handler)
+        def invoke(event, context, **kwargs):
+            """Run the handler while logging its duration and bounded outcome fields.
+
+            Args:
+                event (dict[str, Any]): Handler payload, passed through without logging.
+                context (LambdaContext | None): Context supplying an optional request ID.
+                **kwargs (dict[str, Any]): Injectable adapters passed unchanged to the handler.
+
+            Returns:
+                dict[str, Any]: Original handler result; exceptions propagate unchanged.
+            """
+            started = time.monotonic()
+            request_id = getattr(context, "aws_request_id", None)
+            request_id = request_id if isinstance(request_id, str) else "local"
+            LOG.info("Job started: job=%s request_id=%s", name, request_id)
+            try:
+                result = handler(event, context, **kwargs)
+            except Exception as error:
+                # Exception text and raw payloads can contain credentials or signed URLs.
+                LOG.error("Job failed: job=%s request_id=%s elapsed_ms=%d error=%s",
+                          name, request_id, (time.monotonic() - started) * 1000, type(error).__name__)
+                raise
+            outcome = result.get("skipped") or result.get("status") or "completed"
+            http_status = result.get("statusCode")
+            if isinstance(http_status, int) and http_status >= 400:
+                outcome = "failed" if http_status >= 500 else "rejected"
+            level = logging.ERROR if isinstance(http_status, int) and http_status >= 500 else logging.INFO
+            LOG.log(level, "Job finished: job=%s request_id=%s elapsed_ms=%d outcome=%s http_status=%s",
+                    name, request_id, (time.monotonic() - started) * 1000, outcome, http_status)
+            return result
+        return invoke
+    return decorate
 
 
 def utcnow():

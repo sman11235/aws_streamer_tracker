@@ -488,21 +488,24 @@ class Store:
         ))
 
     def pending_videos(self):
-        """Return tracked live/scheduled YouTube videos, oldest polling attempts first.
+        """Return tracked YouTube videos needing lifecycle reconciliation, oldest first.
+
+        Include timeout-ended videos until an authoritative response confirms their
+        lifecycle so a temporary API outage cannot permanently hide a live stream.
 
         Args:
             self (Store): Store instance owning the connection, transactions, and database
                 operations.
 
         Returns:
-            list[dict[str, Any]]: Known tracked YouTube LIVE/SCHEDULED video and channel
-                identifiers in polling order.
+            list[dict[str, Any]]: Known tracked YouTube LIVE/SCHEDULED or timeout-ended
+                video and channel identifiers in polling order.
         """
         return self.query(
             """SELECT v.platform_video_id, v.channel_id, c.platform_channel_id
                FROM videos v JOIN channels c ON c.id = v.channel_id
                WHERE c.is_tracked AND c.platform = 'YOUTUBE'
-                 AND v.stream_status IN ('LIVE', 'SCHEDULED')
+                 AND (v.stream_status IN ('LIVE', 'SCHEDULED') OR v.ended_by_timeout)
                ORDER BY v.last_polled_at NULLS FIRST, v.updated_at""",
         )
 
@@ -513,6 +516,9 @@ class Store:
         Persist an explicit membership flag, preserving an existing flag when the
         snapshot omits it and defaulting new rows without one to False.
         Advance last_polled_at only when an actual polling time is supplied.
+        LIVE metadata advances last_live_observed_at even without viewer counts.
+        Accepted metadata clears an inferred timeout; a resumed live/scheduled
+        stream also clears the inferred end time.
         Return the local video UUID, or None when a newer saved observation prevents
         the update. This method does not create a CCV sample.
 
@@ -536,29 +542,35 @@ class Store:
             """INSERT INTO videos
                (channel_id, platform_video_id, title, description, thumbnail_url,
                 stream_status, scheduled_start_at, actual_start_at, actual_end_at, lifecycle_observed_at,
-                is_members_only, last_polled_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,FALSE),%s)
+                is_members_only, last_polled_at, last_live_observed_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,COALESCE(%s,FALSE),%s,%s)
                ON CONFLICT (channel_id, platform_video_id) DO UPDATE SET
                  title = EXCLUDED.title, description = EXCLUDED.description,
                  thumbnail_url = EXCLUDED.thumbnail_url, stream_status = EXCLUDED.stream_status,
                  is_members_only = COALESCE(%s, videos.is_members_only),
                  last_polled_at = GREATEST(videos.last_polled_at, EXCLUDED.last_polled_at),
+                 last_live_observed_at = GREATEST(videos.last_live_observed_at, EXCLUDED.last_live_observed_at),
+                 ended_by_timeout = FALSE,
                  scheduled_start_at = COALESCE(EXCLUDED.scheduled_start_at, videos.scheduled_start_at),
                  actual_start_at = COALESCE(EXCLUDED.actual_start_at, videos.actual_start_at),
-                 actual_end_at = COALESCE(EXCLUDED.actual_end_at, videos.actual_end_at),
+                 actual_end_at = CASE
+                   WHEN videos.ended_by_timeout AND EXCLUDED.stream_status IN ('LIVE', 'SCHEDULED')
+                     THEN EXCLUDED.actual_end_at
+                   ELSE COALESCE(EXCLUDED.actual_end_at, videos.actual_end_at) END,
                  lifecycle_observed_at = EXCLUDED.lifecycle_observed_at
                WHERE videos.lifecycle_observed_at IS NULL OR videos.lifecycle_observed_at <= EXCLUDED.lifecycle_observed_at
                RETURNING id""",
             (channel_id, video["id"], video["title"], video.get("description"), video.get("thumbnail"),
              video["status"], video.get("scheduled"), video.get("started"), video.get("ended"), observed_at,
-             video.get("is_members_only"), polled_at, video.get("is_members_only")),
+             video.get("is_members_only"), polled_at,
+             observed_at if video["status"] == "LIVE" else None, video.get("is_members_only")),
         )
         return rows[0]["id"] if rows else None
 
     def end_twitch_streams(self, channel_id, observed_at, active_id=None, *, polled_at=None):
         """End live Twitch broadcasts other than the optional active broadcast ID.
 
-        With no active_id, end every live broadcast for the channel. Record the
+        With no active_id, end every live or timeout-ended broadcast for the channel. Record the
         observation time as the end time because no precise end timestamp is known.
         Record an optional polling time only on the broadcasts ended by this lookup.
 
@@ -575,15 +587,52 @@ class Store:
                 or None for webhook updates that preserve each video's last polling time.
 
         Returns:
-            None: Matching previous broadcasts are marked ENDED.
+            None: Matching previous broadcasts are marked ENDED with confirmed offline state.
         """
         self.query(
             """UPDATE videos SET stream_status = 'ENDED', actual_end_at = %s,
+               ended_by_timeout = FALSE, lifecycle_observed_at = %s,
                last_polled_at = GREATEST(last_polled_at, %s)
-               WHERE channel_id = %s AND stream_status = 'LIVE'
+               WHERE channel_id = %s AND (stream_status = 'LIVE' OR ended_by_timeout)
                AND (%s::text IS NULL OR platform_video_id != %s)""",
-            (observed_at, polled_at, channel_id, active_id, active_id),
+            (observed_at, observed_at, polled_at, channel_id, active_id, active_id),
         )
+
+    def expire_stale_streams(self, observed_at, timeout):
+        """Infer ends for tracked LIVE videos without recent successful live metadata.
+
+        Lock channels before videos, matching snapshot writers. Skip channels being
+        reconciled and retry them on the next poll. Recheck freshness in the UPDATE
+        to preserve concurrent fresh observations. Keep lifecycle_observed_at as the
+        last authoritative observation, and preserve all CCV samples/aggregates.
+
+        Args:
+            self (Store): Database adapter owning the connection and SQL operations.
+            observed_at (datetime.datetime): Timezone-aware time of this timeout sweep.
+            timeout (datetime.timedelta): Positive maximum age of a live observation.
+
+        Returns:
+            int: Number of videos newly marked ENDED with an inferred end timestamp
+                at last_live_observed_at plus timeout.
+        """
+        cutoff = observed_at - timeout
+        rows = self.query(
+            """WITH stale_channels AS MATERIALIZED (
+                 SELECT c.id FROM channels c
+                 WHERE c.is_tracked AND EXISTS (
+                   SELECT 1 FROM videos v WHERE v.channel_id = c.id
+                     AND v.stream_status = 'LIVE' AND v.last_live_observed_at <= %s)
+                 ORDER BY c.id FOR UPDATE OF c SKIP LOCKED
+               )
+               UPDATE videos v
+               SET stream_status = 'ENDED', ended_by_timeout = TRUE,
+                   actual_end_at = v.last_live_observed_at + %s
+               WHERE v.channel_id IN (SELECT id FROM stale_channels)
+                 AND v.stream_status = 'LIVE' AND v.last_live_observed_at <= %s
+               RETURNING v.id""",
+            (cutoff, timeout, cutoff),
+        )
+        return len(rows)
 
     def sample(self, video_id, viewers, observed_at):
         """Insert one CCV sample and increment the video's running aggregates.

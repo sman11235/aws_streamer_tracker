@@ -29,7 +29,8 @@ CREATE TABLE channels (
   subscriber_count BIGINT,
   total_views BIGINT,
   last_updated TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (platform, platform_channel_id)
+  UNIQUE (platform, platform_channel_id),
+  CONSTRAINT channels_platform_channel_id_key UNIQUE (platform_channel_id)
 );
 
 CREATE TABLE videos (
@@ -48,7 +49,8 @@ CREATE TABLE videos (
   is_members_only BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (channel_id, platform_video_id)
+  UNIQUE (channel_id, platform_video_id),
+  CONSTRAINT videos_platform_video_id_key UNIQUE (platform_video_id)
 );
 
 CREATE TABLE ccv (

@@ -14,9 +14,13 @@ All checked-in configuration is public and must contain no secret values.
 
 The builder validates runtime YAML and includes it as `tracker/config.yaml` in every ZIP. Lambda cold starts validate and load that copy; no runtime YAML download occurs. Source checkouts read the original file. `TRACKER_CONFIG_FILE=/absolute/path/runtime.yaml` selects a complete alternative file for local runs. Missing, unknown, or invalid settings fail validation; provider batch maxima remain enforced in code.
 
+`logging.level` defaults to `INFO`: invocation start/finish, workload and outcome summaries, and important failures/state changes. Use `DEBUG` temporarily for individual channel/subscription attempts and batch details. See the [job logging guide](logging.md) for fields and CloudWatch search terms.
+
 Changing runtime YAML requires rebuilding and deploying the affected ZIPs. Python no longer reads `WEBSUB_LEASE_SECONDS`, `SUBSCRIPTION_BATCH_SIZE`, or `DATABASE_SSLMODE`; use `youtube.requested_lease_seconds`, `subscriptions.batch_size`, and `database.ssl_mode` instead. TLS defaults to certificate and hostname verification.
 
 `youtube.max_refresh_interval_seconds` is 432000 (five days). WebSub renewal is due at the earlier of that age since verification or `youtube.renewal_fraction` of the granted lease. This controls each subscription's deadline; the maintenance job still runs every ten minutes.
+
+`streams.inactivity_timeout_seconds` is 600 (ten minutes). The stats poller infers an end when a tracked live video has no accepted live observation within this interval. A valid live response resets the clock even without viewer counts; polling attempts do not. Apply migration 004 before deploying this setting/code. See [inactivity and recovery](stream-reconciliation.md).
 
 API field names, XML namespaces, signature algorithms, status codes, SQL, and IAM permission definitions remain code because they define protocols and application behavior.
 

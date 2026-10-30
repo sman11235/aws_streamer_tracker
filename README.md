@@ -32,6 +32,8 @@ Platform URLs and runtime behavior are explicit in [`config/runtime.yaml`](confi
 
 YouTube WebSub and Twitch EventSub registration, signed callbacks, EventBridge processing, and CCV polling are implemented. Follow the [subscription deployment guide](docs/subscriptions.md) to apply the additive database migration, create platform credentials, test callbacks, and enable schedules with `TRACKING_JOBS_ENABLED=true`. Schedules remain disabled by default until those prerequisites are ready.
 
+The [stream inactivity watchdog](docs/stream-reconciliation.md) infers an end after ten minutes without valid live metadata and automatically recovers known streams when data returns. Apply migration 004 before deploying the updated Lambdas; the threshold is configured in runtime YAML.
+
 The [channel updater](docs/channel-updates.md) discovers channel IDs from `streamer_info`, then refreshes tracked channel names, profile pictures, descriptions, and available statistics hourly, saving current values and history snapshots together. Newly added streamers/platform channels are picked up automatically. Its schedule and API settings are in YAML. Apply migration 002 before deploying it.
 
 ## CI/CD
@@ -43,6 +45,8 @@ Follow the [AWS deployment setup](docs/aws-deployment.md) to bootstrap the state
 ## Database
 
 Terraform provisions a private Amazon RDS PostgreSQL instance. Its master password is generated and stored by RDS in Secrets Manager. Apply [`db/schema.sql`](db/schema.sql), followed by all numbered files in [`db/migrations`](db/migrations), with a PostgreSQL client that can reach the private database (for example, through a VPN, bastion host, or an approved migration job). For an existing database, apply only outstanding migrations in order.
+
+Platform channel IDs and platform video IDs are each unique across their entire table. Apply [migration 003](db/migrations/003_unique_platform_ids.sql) to enforce this on an existing database; see [duplicate checks and migration instructions](docs/database-constraints.md). UUID primary keys and existing ownership/history are preserved.
 
 For local administration, the [database access helper](docs/database-access.md) starts the configured EC2 helper, opens a Session Manager tunnel, and launches your saved DBeaver connection. Source its Bash wrapper from `.bashrc` to use `streamer_db`; non-secret defaults are in [`config/database-access.yaml`](config/database-access.yaml).
 

@@ -11,7 +11,7 @@ Runtime URLs, leases, retry intervals, limits, and environment bindings are in [
 | `handle-youtube-notifs` | Answer verification GETs, verify signed Atom POSTs, and publish video-change events |
 | `handle-twitch-notifs` | Verify signed challenges, notifications, and revocations |
 | `handle-stream-events` | Fetch authoritative platform metadata and apply idempotent stream updates |
-| `get-stream-stats` | Poll Twitch channels and known live/scheduled YouTube videos every two minutes, recording available CCV samples |
+| `get-stream-stats` | Poll Twitch channels and known live/scheduled or timeout-ended YouTube videos every two minutes, record available CCV, and infer ends after ten minutes without live data |
 | `update-channels` | Refresh channel profiles and public statistics hourly and record history snapshots |
 
 Notifications flow through the existing EventBridge bus. Webhook handlers acknowledge deliveries only after EventBridge accepts them. The worker records the event receipt and database mutations in one transaction. Duplicate event IDs do not repeat mutations; late Twitch events recheck the currently active broadcast instead of blindly applying the old event's state.
@@ -30,9 +30,11 @@ Notifications flow through the existing EventBridge bus. Webhook handlers acknow
    ```sh
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/001_subscriptions.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/002_channel_updates.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/003_unique_platform_ids.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/004_stream_inactivity.sql
    ```
 
-   For a new database, first apply `db/schema.sql`, then all numbered migrations in order. The migration adds tracking flags, lifecycle ordering, subscription records, processed-event receipts, and incremental CCV aggregates. It preserves existing application records and can be reapplied. Keep your database connection credentials local.
+   For a new database, first apply `db/schema.sql`, then all numbered migrations in order. The migrations add tracking flags, lifecycle ordering, subscription records, processed-event receipts, incremental CCV aggregates, channel metadata/history fields, and global platform-ID uniqueness. They preserve existing application records and can be reapplied. Check for duplicate IDs before applying migration 003; see the [constraint guide](database-constraints.md). Keep your database connection credentials local.
 
 3. Create these SSM SecureString parameters, using the AWS-managed SSM encryption key unless you also grant the Lambda roles permission to decrypt your custom KMS key:
 
@@ -60,7 +62,7 @@ No migration, platform subscription request, or AWS deployment is performed by t
 
 Each callback URL includes a nonsecret `subscription_id` query parameter so callbacks map to a specific local subscription. Subscription attempts are committed before making the platform request. Verification can arrive before that request returns, and the later API response preserves the verified state.
 
-YouTube uses Google's [PubSubHubbub hub](https://pubsubhubbub.appspot.com/) and its 0.4 HMAC-SHA1 protocol. The implementation validates original request bytes before parsing XML and rejects unsafe XML constructs. Invalid HMACs are discarded with a 2xx acknowledgement as required by that protocol. A feed notification is a video change, not proof of a live broadcast. Only authoritative API metadata can classify a video as scheduled, live, or ended; ordinary uploads are ignored. Ambiguous or missing metadata is retried rather than inventing an ended/cancelled state.
+YouTube uses Google's [PubSubHubbub hub](https://pubsubhubbub.appspot.com/) and its 0.4 HMAC-SHA1 protocol. The implementation validates original request bytes before parsing XML and rejects unsafe XML constructs. Invalid HMACs are discarded with a 2xx acknowledgement as required by that protocol. A feed notification is a video change, not proof of a live broadcast. API metadata classifies videos as scheduled, live, or ended; ordinary uploads are ignored. Ambiguous or missing metadata is retried. The separate [inactivity watchdog](stream-reconciliation.md) infers an end after ten minutes without valid live metadata, marks that estimate explicitly, and keeps polling for recovery.
 
 The YouTube job runs every ten minutes. A subscription becomes due for renewal at the earlier of 80% of its actual granted lease or five days after its last successful verification. The five-day cap is `youtube.max_refresh_interval_seconds: 432000` in runtime YAML; it also applies to existing subscriptions whose stored renewal date is later. Accepting a renewal request does not reset the age: the verification callback does. Pending attempts are retried after ten minutes. The default requested lease is five days, so an ordinary five-day lease still renews after four days. Actual attempts happen on a maintenance invocation, subject to the job's batch/time limits and retry backoff; successful verification depends on the hub. If a hub grants very short leases, shorten the maintenance schedule accordingly. The initial feed seeds recent videos; it is not a complete historical backfill. Existing scheduled/live videos already in the database are also polled.
 
@@ -91,6 +93,8 @@ Both the event worker and scheduled poller persist the flag through `Store.upser
 No schema migration is required: `videos.is_members_only` already exists. After deployment, known live/scheduled YouTube streams are classified on their next successful poll and newly notified streams are classified by the event worker. Existing ended streams are not automatically backfilled; they need to be reprocessed using current video metadata.
 
 ## Failures and recovery
+
+All seven handlers log invocation starts, duration/outcome, and job-specific workload summaries. Subscription retry logs include HTTP status and retry delay; webhook logs distinguish verification, accepted notifications, and discarded requests. Routine per-channel success details require `logging.level: DEBUG`. See the [logging guide](logging.md).
 
 `<project>-dev-ingestion-failures` retains failed events for 14 days. It receives EventBridge delivery failures, exhausted Lambda asynchronous invocations, and failed Scheduler deliveries. Inspect the message format before replay: EventBridge messages contain the event directly, while Lambda failure destinations wrap the original event in `requestPayload`. Fix the cause and manually invoke the appropriate function with the original payload. Receipts prevent repeated stream mutations.
 
