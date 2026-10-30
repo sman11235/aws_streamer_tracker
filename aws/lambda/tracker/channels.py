@@ -8,7 +8,7 @@ from uuid import uuid4
 from tracker.configuration import CONFIG
 from tracker.database import Store
 from tracker.platforms import PLATFORMS
-from tracker.runtime import LOG, has_time, timestamp, utcnow
+from tracker.runtime import LOG, has_time, logged_job, timestamp, utcnow
 from tracker.streams import chunks
 
 
@@ -95,6 +95,7 @@ def twitch_channel(item):
     }
 
 
+@logged_job("update-channels")
 def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
     """Discover linked streamer channels, refresh profiles, and record history.
 
@@ -137,6 +138,8 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
         settings = CONFIG["channel_updates"]
         youtube = chunks(store.channels_for_refresh("YOUTUBE", collection_key), settings["youtube_batch_size"])
         twitch = chunks(store.channels_for_refresh("TWITCH", collection_key), settings["twitch_batch_size"])
+        LOG.info("Channel refresh work selected: collection_key=%s discovered=%d youtube_channels=%d twitch_channels=%d",
+                 collection_key, counts["discovered"], sum(map(len, youtube)), sum(map(len, twitch)))
         batches = [(provider, batch) for pair in zip_longest(youtube, twitch)
                    for provider, batch in zip(("youtube", "twitch"), pair) if batch]
         for provider, batch in batches:
@@ -144,6 +147,7 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                 counts["deferred"] += len(batch)
                 continue
             observed_at = utcnow()
+            LOG.debug("Channel refresh batch: provider=%s channels=%d", provider, len(batch))
             try:
                 ids = [channel["platform_channel_id"] for channel in batch]
                 items = platforms.youtube_channels(ids) if provider == "youtube" else platforms.twitch_users(ids)
@@ -151,7 +155,7 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                 # A failed profile batch was attempted; rotate it behind other work.
                 store.mark_metadata_attempt([channel["id"] for channel in batch], observed_at)
                 counts["failed"] += len(batch)
-                LOG.exception("Channel metadata batch failed: provider=%s", provider)
+                LOG.exception("Channel metadata batch failed: provider=%s channels=%d", provider, len(batch))
                 continue
             for channel in batch:
                 if not has_time(context, started):
@@ -173,10 +177,11 @@ def update(event, context, *, store_factory=Store.open, platforms=PLATFORMS):
                     metadata = youtube_channel(item) if provider == "youtube" else twitch_channel(item)
                     outcome = store.save_channel_snapshot(channel["id"], metadata, observed_at, collection_key)
                     counts[outcome] += 1
+                    LOG.debug("Channel refresh result: provider=%s channel_id=%s outcome=%s", provider, channel["id"], outcome)
                 except Exception:
                     counts["failed"] += 1
                     LOG.exception("Channel metadata update failed: provider=%s channel_id=%s", provider, channel["id"])
-    LOG.info("Channel metadata refresh: %s", counts)
+    LOG.info("Channel metadata refresh: counts=%s collection_key=%s deferred_reason=invocation_budget", counts, collection_key)
     if counts["failed"]:
         raise RuntimeError("Some channel updates failed; successful snapshots were committed")
     return counts

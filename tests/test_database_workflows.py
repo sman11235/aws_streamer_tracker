@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from tests.support import SECRET, api_event, aws_mock, feed, twitch_event, youtube_channel_item
 from tracker.channels import update as update_channels, youtube_channel
+from tracker.configuration import CONFIG
 from tracker.database import Store
 from tracker.platforms import Platforms, callback_url
 from tracker.runtime import utcnow
@@ -901,6 +902,233 @@ class DatabaseWorkflowTests(unittest.TestCase):
         apply_snapshot(self.store, channel, start + timedelta(minutes=4), None, provider="twitch")
         row = self.store.query("SELECT stream_status, last_polled_at FROM videos")[0]
         self.assertEqual(row, {"stream_status": "ENDED", "last_polled_at": polled})
+
+    def test_stream_inactivity_boundary_preserves_samples_and_non_live_rows(self):
+        """End only tracked LIVE rows at exactly ten minutes without live metadata.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert boundary behavior, estimated end times, idempotency, and unchanged
+                polling times, scheduled/ended history, and CCV samples/aggregates.
+        """
+        start = utcnow() - timedelta(hours=1)
+        tracked = self.channel("YOUTUBE")
+        untracked = self.channel("TWITCH")
+        for status in ("LIVE", "SCHEDULED", "ENDED", "CANCELLED"):
+            self.store.upsert_video(tracked["id"], {"id": status, "title": status, "status": status}, start)
+        self.store.upsert_video(untracked["id"], {"id": "untracked", "title": "Untracked", "status": "LIVE"}, start)
+        self.store.query("UPDATE channels SET is_tracked = FALSE WHERE id = %s", (untracked["id"],))
+        live = self.store.query("SELECT * FROM videos WHERE platform_video_id = 'LIVE'")[0]
+        self.store.sample(live["id"], 123, start)
+        aggregates = self.store.query("SELECT peak_ccv, avg_ccv, ccv_sample_count, ccv_sample_sum FROM videos WHERE id = %s", (live["id"],))
+        timeout = timedelta(minutes=10)
+        self.assertEqual(self.store.expire_stale_streams(start + timeout - timedelta(microseconds=1), timeout), 0)
+        self.assertEqual(self.store.expire_stale_streams(start + timeout, timeout), 1)
+        rows = {row["platform_video_id"]: row for row in self.store.query("SELECT * FROM videos")}
+        self.assertEqual(rows["LIVE"]["stream_status"], "ENDED")
+        self.assertTrue(rows["LIVE"]["ended_by_timeout"])
+        self.assertEqual(rows["LIVE"]["actual_end_at"], start + timeout)
+        self.assertEqual(rows["LIVE"]["last_live_observed_at"], start)
+        self.assertEqual(rows["LIVE"]["lifecycle_observed_at"], start)
+        self.assertIsNone(rows["LIVE"]["last_polled_at"])
+        for status in ("SCHEDULED", "ENDED", "CANCELLED"):
+            self.assertEqual(rows[status]["stream_status"], status)
+            self.assertFalse(rows[status]["ended_by_timeout"])
+        self.assertEqual(rows["untracked"]["stream_status"], "LIVE")
+        self.assertEqual(self.store.query("SELECT peak_ccv, avg_ccv, ccv_sample_count, ccv_sample_sum FROM videos WHERE id = %s", (live["id"],)), aggregates)
+        self.assertEqual(self.store.query("SELECT ccv FROM ccv"), [{"ccv": 123}])
+        self.assertEqual(self.store.expire_stale_streams(start + timedelta(hours=1), timeout), 0)
+
+    def test_missing_youtube_responses_timeout_despite_poll_attempts_and_recover(self):
+        """Time out missing YouTube metadata, then reconcile resumed and confirmed-ended data.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert attempts cannot keep a stream alive, timeout rows remain pollable,
+                live recovery clears the inferred end, and actual ends stop recovery polling.
+        """
+        start = utcnow() - timedelta(hours=1)
+        channel = self.channel("YOUTUBE")
+        video_id = self.store.upsert_video(channel["id"], {"id": "video", "title": "Live", "status": "LIVE"}, start)
+        platforms = MagicMock()
+        platforms.youtube_videos.return_value = {}
+        for seconds, expected in ((599, 0), (600, 1), (720, 0)):
+            now = start + timedelta(seconds=seconds)
+            with patch("tracker.streams.utcnow", return_value=now):
+                result = poll({}, None, store_factory=self.open_store, platforms=platforms)
+            self.assertEqual(result["timed_out_streams"], expected)
+            row = self.store.query("SELECT * FROM videos")[0]
+            self.assertEqual(row["last_polled_at"], now)
+            self.assertEqual(row["last_live_observed_at"], start)
+            self.assertEqual(self.store.pending_videos()[0]["platform_video_id"], "video")
+        item = {"id": "video", "snippet": {"channelId": "UC-channel", "title": "Live", "liveBroadcastContent": "live"},
+                "liveStreamingDetails": {"actualStartTime": start.isoformat()}, "statistics": {"viewCount": "0"}}
+        platforms.youtube_videos.return_value = {"video": item}
+        resumed = start + timedelta(minutes=14)
+        with patch("tracker.streams.utcnow", return_value=resumed):
+            self.assertEqual(poll({}, None, store_factory=self.open_store, platforms=platforms)["timed_out_streams"], 0)
+        row = self.store.query("SELECT * FROM videos")[0]
+        self.assertEqual(row["id"], video_id)
+        self.assertEqual(row["stream_status"], "LIVE")
+        self.assertEqual(row["last_live_observed_at"], resumed)
+        self.assertIsNone(row["actual_end_at"])
+        self.assertFalse(row["ended_by_timeout"])
+        self.assertEqual(self.store.query("SELECT count(*) AS n FROM ccv")[0]["n"], 0)
+        self.assertEqual(self.store.expire_stale_streams(resumed + timedelta(minutes=10), timedelta(minutes=10)), 1)
+        actual_end = resumed + timedelta(minutes=9)
+        item["liveStreamingDetails"]["actualEndTime"] = actual_end.isoformat()
+        with patch("tracker.streams.utcnow", return_value=resumed + timedelta(minutes=12)):
+            poll({}, None, store_factory=self.open_store, platforms=platforms)
+        row = self.store.query("SELECT * FROM videos")[0]
+        self.assertEqual(row["stream_status"], "ENDED")
+        self.assertFalse(row["ended_by_timeout"])
+        self.assertEqual(row["actual_end_at"], actual_end)
+        self.assertEqual(self.store.pending_videos(), [])
+
+    def test_valid_live_metadata_with_zero_or_missing_viewers_prevents_timeout(self):
+        """Use lifecycle observations rather than presence of a viewer count as the heartbeat.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert fresh event/poll snapshots keep streams live and stale snapshots
+                cannot extend the deadline or create samples.
+        """
+        start = utcnow() - timedelta(hours=1)
+        channel = self.channel("YOUTUBE")
+        video = {"id": "video", "title": "Live", "status": "LIVE"}
+        apply_snapshot(self.store, channel, start, video, provider="youtube")
+        fresh = start + timedelta(minutes=9)
+        apply_snapshot(self.store, channel, fresh, {**video, "viewers": 0}, provider="youtube", sample=True)
+        apply_snapshot(self.store, channel, fresh - timedelta(minutes=1), video, provider="youtube")
+        self.assertEqual(self.store.expire_stale_streams(start + timedelta(minutes=10), timedelta(minutes=10)), 0)
+        self.assertEqual(self.store.query("SELECT last_live_observed_at FROM videos")[0]["last_live_observed_at"], fresh)
+        self.assertEqual(self.store.query("SELECT ccv FROM ccv"), [{"ccv": 0}])
+        event_at = fresh + timedelta(minutes=9)
+        apply_snapshot(self.store, channel, event_at, video, provider="youtube")
+        self.assertEqual(self.store.expire_stale_streams(event_at + timedelta(minutes=9), timedelta(minutes=10)), 0)
+        row = self.store.query("SELECT * FROM videos")[0]
+        self.assertEqual(row["last_live_observed_at"], event_at)
+        self.assertEqual(row["last_polled_at"], fresh)
+
+    def test_failed_and_deferred_batches_still_end_stale_streams(self):
+        """Run the watchdog despite API errors or polling budget exhaustion.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert both providers time out on errors, failed jobs still request a
+                retry, and deferred batches do not prevent the watchdog from running.
+        """
+        start = utcnow() - timedelta(hours=1)
+        for platform in ("TWITCH", "YOUTUBE"):
+            channel = self.channel(platform)
+            self.store.upsert_video(channel["id"], {"id": platform, "title": "Live", "status": "LIVE"}, start)
+        platforms = MagicMock()
+        platforms.twitch_streams.side_effect = RuntimeError("API unavailable")
+        platforms.youtube_videos.side_effect = RuntimeError("API unavailable")
+        with self.assertLogs("tracker", level="ERROR"), patch("tracker.streams.utcnow", return_value=start + timedelta(minutes=10)), self.assertRaisesRegex(RuntimeError, "Some polling batches failed"):
+            poll({}, None, store_factory=self.open_store, platforms=platforms)
+        self.assertTrue(all(row["ended_by_timeout"] for row in self.store.query("SELECT * FROM videos")))
+        self.store.query("UPDATE videos SET stream_status = 'LIVE', ended_by_timeout = FALSE, actual_end_at = NULL")
+        with patch.dict(CONFIG["streams"], inactivity_timeout_seconds=300), patch("tracker.streams.has_time", return_value=False), patch("tracker.streams.utcnow", return_value=start + timedelta(minutes=5)):
+            result = poll({}, None, store_factory=self.open_store, platforms=platforms)
+        self.assertEqual(result["timed_out_streams"], 2)
+        self.assertEqual(result["deferred_batches"], 2)
+
+    def test_twitch_timeout_reopens_same_broadcast_and_confirms_offline_or_replacement(self):
+        """Recover Twitch inferred ends and settle them on authoritative offline/replacement data.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance owning an isolated PostgreSQL schema.
+
+        Returns:
+            None: Assert same-ID recovery retains ownership, inferred ends are cleared,
+                and old broadcasts receive confirmed end times without changing CCV history.
+        """
+        start = utcnow() - timedelta(hours=1)
+        channel = self.channel()
+        video = {"id": "first", "title": "Live", "status": "LIVE", "viewers": 10}
+        apply_snapshot(self.store, channel, start, video, provider="twitch", sample=True)
+        video_id = self.store.query("SELECT id FROM videos")[0]["id"]
+        self.store.expire_stale_streams(start + timedelta(minutes=10), timedelta(minutes=10))
+        recovered = start + timedelta(minutes=12)
+        apply_snapshot(self.store, channel, recovered, video, provider="twitch", sample=True)
+        row = self.store.query("SELECT * FROM videos")[0]
+        self.assertEqual(row["id"], video_id)
+        self.assertEqual(row["stream_status"], "LIVE")
+        self.assertIsNone(row["actual_end_at"])
+        self.assertFalse(row["ended_by_timeout"])
+        self.store.expire_stale_streams(recovered + timedelta(minutes=10), timedelta(minutes=10))
+        replaced = recovered + timedelta(minutes=12)
+        apply_snapshot(self.store, channel, replaced, {**video, "id": "second"}, provider="twitch", sample=True)
+        rows = {row["platform_video_id"]: row for row in self.store.query("SELECT * FROM videos")}
+        self.assertFalse(rows["first"]["ended_by_timeout"])
+        self.assertEqual(rows["first"]["actual_end_at"], replaced)
+        self.assertEqual(rows["first"]["ccv_sample_count"], 2)
+        self.store.expire_stale_streams(replaced + timedelta(minutes=10), timedelta(minutes=10))
+        offline = replaced + timedelta(minutes=12)
+        apply_snapshot(self.store, channel, offline, None, provider="twitch", sample=True)
+        self.assertTrue(all(not row["ended_by_timeout"] and row["stream_status"] == "ENDED"
+                            for row in self.store.query("SELECT * FROM videos")))
+        self.assertEqual(self.store.query("SELECT actual_end_at FROM videos WHERE platform_video_id = 'second'")[0]["actual_end_at"], offline)
+
+    def test_timeout_skips_channels_locked_by_concurrent_reconciliation(self):
+        """Avoid blocking or overwriting an in-flight fresh stream observation.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance opening two independent connections.
+
+        Returns:
+            None: Assert a locked channel is skipped and fresh committed metadata remains live.
+        """
+        start = utcnow() - timedelta(hours=1)
+        channel = self.channel()
+        video = {"id": "video", "title": "Live", "status": "LIVE"}
+        self.store.upsert_video(channel["id"], video, start)
+        now = start + timedelta(minutes=10)
+        with self.open_store() as writer:
+            with writer.atomic():
+                writer.channel(channel["id"], lock=True)
+                self.assertEqual(self.store.expire_stale_streams(now, timedelta(minutes=10)), 0)
+                writer.upsert_video(channel["id"], video, now)
+        self.assertEqual(self.store.expire_stale_streams(now, timedelta(minutes=10)), 0)
+        self.assertEqual(self.store.query("SELECT stream_status FROM videos")[0]["stream_status"], "LIVE")
+
+    def test_inactivity_migration_backfills_real_observations_and_is_repeatable(self):
+        """Backfill existing live rows without treating recent polling attempts as live data.
+
+        Args:
+            self (DatabaseWorkflowTests): Test instance simulating a database before migration 004.
+
+        Returns:
+            None: Assert the newest actual observation/sample is used, legacy rows without
+                evidence get a grace period, and reapplying the migration preserves state.
+        """
+        start = utcnow() - timedelta(hours=1)
+        channel = self.channel("YOUTUBE")
+        known_id = self.store.upsert_video(channel["id"], {"id": "known", "title": "Live", "status": "LIVE"}, start)
+        legacy_id = self.store.upsert_video(channel["id"], {"id": "legacy", "title": "Live", "status": "LIVE"}, start)
+        self.store.sample(known_id, 15, start + timedelta(minutes=1))
+        self.store.query("UPDATE videos SET lifecycle_observed_at = NULL WHERE id = %s", (legacy_id,))
+        self.store.query("UPDATE videos SET last_polled_at = %s", (utcnow(),))
+        self.store.query("ALTER TABLE videos DROP COLUMN last_live_observed_at, DROP COLUMN ended_by_timeout")
+        before = utcnow()
+        migration = (ROOT / "db/migrations/004_stream_inactivity.sql").read_text()
+        self.store.query(migration)
+        rows = {row["id"]: row for row in self.store.query("SELECT * FROM videos")}
+        self.assertEqual(rows[known_id]["last_live_observed_at"], start + timedelta(minutes=1))
+        self.assertGreaterEqual(rows[legacy_id]["last_live_observed_at"], before)
+        self.assertLessEqual(rows[legacy_id]["last_live_observed_at"], utcnow())
+        self.store.query(migration)
+        self.assertEqual(self.store.query("SELECT * FROM videos ORDER BY id"), sorted(rows.values(), key=lambda row: row["id"]))
+        self.assertEqual(self.store.query("SELECT ccv FROM ccv"), [{"ccv": 15}])
 
     def test_poller_preserves_missing_youtube_viewer_counts(self):
         """Verify a live transition without YouTube viewer data creates no fabricated CCV sample.

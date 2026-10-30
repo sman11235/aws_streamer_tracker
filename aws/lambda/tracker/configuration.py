@@ -14,6 +14,7 @@ REQUIRED_KEYS = {
     "aws": "connect_timeout_seconds read_timeout_seconds max_retry_attempts cache_ttl_seconds eventbridge_batch_size",
     "database": "port connect_timeout_seconds ssl_mode ca_bundle_filename",
     "jobs": "remaining_time_reserve_seconds local_time_budget_seconds",
+    "streams": "inactivity_timeout_seconds",
     "channel_updates": "youtube_batch_size twitch_batch_size",
     "subscriptions": "batch_size pending_retry_seconds verification_timeout_seconds retry_base_seconds retry_max_seconds retry_exponent_cap",
     "youtube": "hub_url feed_url videos_url channels_url channel_parts video_parts requested_lease_seconds renewal_fraction max_refresh_interval_seconds max_accepted_lease_seconds polling_batch_size thumbnail_priority",

@@ -32,6 +32,8 @@ Platform URLs and runtime behavior are explicit in [`config/runtime.yaml`](confi
 
 YouTube WebSub and Twitch EventSub registration, signed callbacks, EventBridge processing, and CCV polling are implemented. Follow the [subscription deployment guide](docs/subscriptions.md) to apply the additive database migration, create platform credentials, test callbacks, and enable schedules with `TRACKING_JOBS_ENABLED=true`. Schedules remain disabled by default until those prerequisites are ready.
 
+The [stream inactivity watchdog](docs/stream-reconciliation.md) infers an end after ten minutes without valid live metadata and automatically recovers known streams when data returns. Apply migration 004 before deploying the updated Lambdas; the threshold is configured in runtime YAML.
+
 The [channel updater](docs/channel-updates.md) discovers channel IDs from `streamer_info`, then refreshes tracked channel names, profile pictures, descriptions, and available statistics hourly, saving current values and history snapshots together. Newly added streamers/platform channels are picked up automatically. Its schedule and API settings are in YAML. Apply migration 002 before deploying it.
 
 ## CI/CD
